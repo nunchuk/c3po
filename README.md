@@ -101,9 +101,11 @@ a running server, starts one if needed, waits until it is ready, and opens the
 page. If anything fails it shows a dialog with the diagnosis — a double-clicked
 app has no terminal, so a silent failure would just look broken.
 
-The app is a thin wrapper around `scripts/c3po-open.sh`; edit that script to
-change behaviour, no rebuild needed. Logs: `~/.c3po-launch.log` (launcher) and
-`~/.c3po-server.log` (server).
+It also creates **C-3PO Quit.app** for stopping everything — see "Stopping c3po".
+
+The apps are thin wrappers around `scripts/c3po-open.sh` and
+`scripts/c3po-quit.sh`; edit those to change behaviour, no rebuild needed. Logs:
+`~/.c3po-launch.log`, `~/.c3po-quit.log`, `~/.c3po-server.log`.
 
 The icon is generated from `assets/c3po.svg` by `scripts/make-icon.py` (AppKit +
 `sips` + `iconutil`, all built into macOS — no `rsvg-convert`/`inkscape` needed).
@@ -118,6 +120,26 @@ In the page:
   in the right panel and click **Save context**.
 - Reply suggestions refresh automatically as the conversation moves. Click a card
   to copy it. Press **⌘J** to force an immediate refresh.
+
+## Stopping c3po
+
+**Closing the browser does not stop c3po.** That only drops the WebSocket — the
+server keeps running (~41 MB), holds port 8989, and keeps the subtitle-overlay
+child process alive.
+
+Double-click **C-3PO Quit.app**, or:
+
+```bash
+bash scripts/c3po-quit.sh
+```
+
+It sends `SIGTERM` so the server runs its shutdown handler (stop the suggester,
+terminate the overlay child, clear the overlay flag), waits for a clean exit, and
+only escalates to `SIGKILL` if that stalls. A clean shutdown takes ~15s.
+
+Avoid `kill -9` / `pkill -9` yourself: the handler never runs, and the overlay is
+an always-on-top window that then cannot be closed from the UI. If that does
+happen, `scripts/c3po-quit.sh` sweeps up the orphan.
 
 ## Configuration
 

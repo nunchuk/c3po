@@ -5,6 +5,29 @@
 
 ## [Unreleased]
 
+### Added — a way to stop c3po (2026-09-30)
+
+Closing the browser only drops the WebSocket: the server stayed up (~41 MB RSS,
+holding port 8989) along with the subtitle-overlay child process. There was no
+exit path short of hunting the PID by hand.
+
+- `scripts/c3po-quit.sh` — `SIGTERM` so the server runs its shutdown handler,
+  wait for a clean exit, escalate to `SIGKILL` only if it stalls, then sweep up an
+  orphaned overlay and clear the overlay flag file. Idempotent: safe to run when
+  nothing is running.
+- `C-3PO Quit.app`, built by the same `make-overlay-app.sh`. The bundle-writing
+  logic became a `build_app` function rather than a second copy of ~90 lines.
+
+Finds the server via `lsof` on the port rather than `pgrep -f c3po.server`, which
+also matches the launching shell and the quit script itself.
+
+The grace period is 30s because a clean shutdown was **measured at 15s** once the
+overlay child exists (the handler terminates it and waits up to 5s). The first
+version used 10s and escalated to `SIGKILL` every single time — self-defeating,
+since `SIGKILL` skips the handler and is exactly what orphans the always-on-top
+overlay window. Worth noting the earlier 1s measurement was taken before the
+overlay existed, so it no longer applied.
+
 ### Added — macOS launcher app (2026-09-29)
 
 Double-click launcher so starting c3po no longer means opening a terminal and
