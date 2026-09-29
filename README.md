@@ -164,3 +164,23 @@ variables (loaded from `.env`). Common ones:
 - `scripts/verify_translation.py` — checks the local NLLB EN→ZH translation path.
 - `scripts/feed_asr.py` — feeds a WebM file straight to `/asr` (no browser), handy
   for debugging the transcription/translation pipeline.
+
+## Debugging "no subtitles appear"
+
+Several unrelated faults all look identical from the page — nothing shows up. These
+tools exist to tell them apart; work down the list to find where audio stops.
+
+| Tool | Answers |
+|---|---|
+| `scripts/feed_asr.py <file.webm> ws://localhost:8989/asr` | Is the **server** pipeline healthy? It bypasses the browser entirely. Transcript + Chinese here means the fault is browser-side. |
+| `/mictest` page | Can the **browser** capture from a given device? Shows the live level and the track the browser actually handed over. Pick BlackHole 2ch and watch the peak. |
+| `C3PO_DUMP_AUDIO=/tmp/dump.webm` | What exactly did the browser **send**? Inspect it offline: `ffmpeg -i /tmp/dump.webm -af volumedetect -f null -`. A `mean_volume` near -90 dB means silence was streamed. |
+| `/clientlog` (POST `{"msg": "..."}`) | Page-side diagnostics in the server log — the browser console is not readable from a terminal, and Chrome disables JavaScript-via-AppleScript by default. |
+
+Useful server-log signals: `n_tokens_produced: 0` with a healthy
+`n_chunks_received` means audio arrived but decoded to nothing; `no speech, stop`
+means Whisper judged it silent. Whisper hallucinating a famous speech ("And so my
+fellow Americans...") is a reliable tell for **silent input**, not a model problem.
+
+Also note: `curl` to localhost needs `--noproxy '*'` when a proxy is configured,
+otherwise it returns `HTTP 000` and a healthy server looks dead.

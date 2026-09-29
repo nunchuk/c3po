@@ -79,7 +79,8 @@ URL and opens in the browser. Both `localhost:8989` and `127.0.0.1:8989` work.
 
 ### Added — debugging aids (2026-09-29)
 
-Temporary, kept for now pending a decision to remove:
+Kept deliberately: each one is what actually located a fault above, and the audio
+path has several failure modes that all present identically as "no subtitles".
 
 - `/mictest` page (`c3po/static/mictest.html`) — shows the live input level per
   audio device, to separate "the browser is capturing silence" from "the server
