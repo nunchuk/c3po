@@ -14,6 +14,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -62,14 +65,60 @@ logger.setLevel(logging.INFO)
 transcription_engine: TranscriptionEngine | None = None
 suggester: Suggester | None = None
 translator: Translator | None = None
+overlay_process: subprocess.Popen | None = None
 
 _PANEL_DIR = Path(__file__).parent / "static"
+
+
+# --- Floating subtitle overlay (child process) ---
+
+
+def _set_overlay_visible(visible: bool) -> None:
+    """Create or remove the flag file the overlay polls."""
+    path = config.overlay_visible_flag
+    if visible:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+    elif os.path.exists(path):
+        os.remove(path)
+
+
+def _start_overlay() -> subprocess.Popen | None:
+    """Launch the overlay in its own process.
+
+    PyObjC needs the main thread for its run loop and uvicorn already owns ours,
+    so the overlay cannot live in this process.
+    """
+    # Truncate: the overlay only reads the tail, but a stale file from the last
+    # session would briefly show subtitles from a meeting that already ended.
+    try:
+        open(config.subtitle_file, "w").close()
+    except OSError:
+        logger.warning("Could not truncate %s", config.subtitle_file, exc_info=True)
+
+    _set_overlay_visible(False)   # start hidden; the web button reveals it
+    try:
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-m", "c3po.overlay",
+                "--subtitle-file", config.subtitle_file,
+                "--visible-flag", config.overlay_visible_flag,
+                # So a SIGKILL'd server does not leave the window orphaned.
+                "--parent-pid", str(os.getpid()),
+            ],
+            cwd=str(Path(__file__).parent.parent),
+        )
+        logger.info("Subtitle overlay started (pid=%s)", proc.pid)
+        return proc
+    except OSError:
+        logger.warning("Failed to start the subtitle overlay", exc_info=True)
+        return None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Build the shared transcription engine and start the suggestion loop."""
-    global transcription_engine, suggester, translator
+    global transcription_engine, suggester, translator, overlay_process
 
     # No target_language: WLK only transcribes. c3po translates each finalized
     # English sentence on Bedrock (see translator.py), which frees NLLB's ~1.5GB
@@ -88,13 +137,23 @@ async def lifespan(app: FastAPI):
     suggester = Suggester()
     suggester.start()
     translator = Translator()
-    logger.info("c3po ready: whisper=%s translate=bedrock backend=%s",
-                config.whisper_model, config.backend)
+    if config.overlay_enabled:
+        overlay_process = _start_overlay()
+    logger.info("c3po ready: whisper=%s translate=%s backend=%s",
+                config.whisper_model, config.translate_model_id, config.backend)
     try:
         yield
     finally:
         if suggester is not None:
             await suggester.stop()
+        if overlay_process is not None and overlay_process.poll() is None:
+            overlay_process.terminate()
+            try:
+                overlay_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                overlay_process.kill()
+            logger.info("Subtitle overlay stopped")
+        _set_overlay_visible(False)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -199,6 +258,62 @@ async def force_refresh() -> dict:
     assert suggester is not None
     suggester.force_refresh()
     return {"ok": True}
+
+
+# --- Overlay show/hide (page button) ---
+
+
+class OverlayBody(BaseModel):
+    visible: bool
+
+
+def _overlay_state() -> dict:
+    running = overlay_process is not None and overlay_process.poll() is None
+    return {
+        "visible": os.path.exists(config.overlay_visible_flag),
+        "running": running,
+    }
+
+
+@app.get("/overlay")
+async def get_overlay() -> dict:
+    """Current overlay state, so the page can restore its button after reload."""
+    return _overlay_state()
+
+
+@app.post("/overlay")
+async def set_overlay(body: OverlayBody) -> dict:
+    _set_overlay_visible(body.visible)
+    return _overlay_state()
+
+
+# --- Shutdown (page power button) ---
+
+
+@app.post("/shutdown")
+async def shutdown() -> dict:
+    """Stop the server from the page.
+
+    Closing the browser only drops the WebSocket -- the process keeps running and
+    holds the port, so there has to be a way out from the UI itself.
+
+    Signals the process rather than calling sys.exit: SIGTERM is what uvicorn
+    listens for, and it runs the lifespan shutdown handler, which stops the
+    suggester and terminates the overlay child. Exiting straight from the request
+    would skip that and orphan the always-on-top overlay window.
+
+    Scheduled on the event loop instead of sent inline so this response is
+    delivered first -- otherwise the page sees a dropped connection and cannot
+    tell a successful shutdown from a crash.
+    """
+    logger.info("Shutdown requested from the page")
+
+    async def _terminate() -> None:
+        await asyncio.sleep(0.3)   # let the response flush
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.create_task(_terminate())
+    return {"stopping": True}
 
 
 # --- Suggestions WebSocket (server -> panel) ---

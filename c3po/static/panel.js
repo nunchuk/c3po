@@ -98,6 +98,106 @@
     setStatus("refreshing...");
   }
 
+  // Floating-subtitle toggle, placed right after WLK's settings gear.
+  //
+  // Reuses WLK's own `.settings-toggle` class so it inherits the 40px circle,
+  // the theme-aware colours and the `.active` state for free — no duplicated
+  // styling to keep in sync.
+  const OVERLAY_ICON =
+    '<svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960"' +
+    ' width="24px" fill="currentColor"><path d="M240-400h280v-80H240v80Zm320 0h160v-80H560v80Z' +
+    'M240-560h160v-80H240v80Zm240 0h240v-80H480v80ZM160-160q-33 0-56.5-23.5T80-240v-480q0-33 ' +
+    '23.5-56.5T160-800h640q33 0 56.5 23.5T880-720v480q0 33-23.5 56.5T800-160H160Zm0-80h640v-480' +
+    'H160v480Zm0 0v-480 480Z"/></svg>';
+
+  function addOverlayButton() {
+    const container = document.querySelector(".buttons-container");
+    if (!container) {
+      setTimeout(addOverlayButton, 300);
+      return;
+    }
+    const btn = document.createElement("button");
+    btn.id = "c3po-overlay-toggle";
+    btn.className = "settings-toggle";
+    btn.title = "Show/hide floating subtitles";
+    btn.innerHTML = OVERLAY_ICON;
+    container.appendChild(btn);
+
+    const paint = (visible) => btn.classList.toggle("active", !!visible);
+
+    btn.addEventListener("click", async () => {
+      // Derive the next state from the button, then trust the server's reply —
+      // the overlay may have been quit from its own right-click menu.
+      const next = !btn.classList.contains("active");
+      try {
+        const res = await fetch("/overlay", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ visible: next }),
+        });
+        paint((await res.json()).visible);
+      } catch (e) {
+        report("overlay toggle failed: " + e);
+      }
+    });
+
+    // Restore state after a page reload.
+    fetch("/overlay")
+      .then((r) => r.json())
+      .then((s) => paint(s.visible))
+      .catch(() => {});
+  }
+
+  // Power button: quit c3po entirely.
+  //
+  // Closing the browser only drops the WebSocket -- the server keeps running and
+  // holds the port. Same `.settings-toggle` styling as the subtitle button.
+  const POWER_ICON =
+    '<svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960"' +
+    ' width="24px" fill="currentColor"><path d="M440-520v-320h80v320h-80ZM480-80' +
+    'q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-80 29.5-151T192-756l57 57' +
+    'q-44 44-66.5 100T160-480q0 134 93 227t227 93q134 0 227-93t93-227q0-63-22.5-119' +
+    'T711-699l57-57q53 54 82.5 125T880-480q0 83-31.5 156T763-197q-54 54-127 85.5' +
+    'T480-80Z"/></svg>';
+
+  function addPowerButton() {
+    const container = document.querySelector(".buttons-container");
+    if (!container) {
+      setTimeout(addPowerButton, 300);
+      return;
+    }
+    const btn = document.createElement("button");
+    btn.id = "c3po-power";
+    btn.className = "settings-toggle";
+    btn.title = "Quit c3po (stops the server)";
+    btn.innerHTML = POWER_ICON;
+    container.appendChild(btn);
+
+    btn.addEventListener("click", async () => {
+      // Confirm: this stops transcription mid-meeting, and the only way back is
+      // relaunching the app and waiting ~80s for the model to load.
+      if (!window.confirm("Quit c3po? This stops the server and the subtitles.")) {
+        return;
+      }
+      btn.classList.add("active");
+      btn.disabled = true;
+      try {
+        await fetch("/shutdown", { method: "POST" });
+      } catch (e) {
+        // A dropped connection here is the expected outcome, not a failure:
+        // the server may finish exiting before the response arrives.
+      }
+      // The socket is gone, so no further server state is reachable. Say so in
+      // the page rather than leaving a stale transcript that looks live.
+      document.body.innerHTML =
+        '<div style="display:flex;align-items:center;justify-content:center;' +
+        'height:100vh;font:600 18px -apple-system,sans-serif;color:#888;' +
+        'text-align:center;line-height:1.6">c3po has stopped.<br>' +
+        '<span style="font-weight:400;font-size:15px">You can close this tab. ' +
+        'Launch C-3PO.app to start again.</span></div>';
+    });
+  }
+
   function wireEvents() {
     document.getElementById("c3po-save").addEventListener("click", saveContext);
     document
@@ -205,6 +305,8 @@
 
   function init() {
     buildPanel();
+    addOverlayButton();
+    addPowerButton();
     wireEvents();
     connectSuggestions();
     tameScrolling();

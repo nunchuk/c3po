@@ -57,6 +57,27 @@ class Translator:
         """Return the cached translation for `text`, or None if not translated yet."""
         return self._cache.get(text.strip())
 
+    def _finalize(self, text: str, zh: str) -> None:
+        """Mark a translation complete and append it to the subtitle file.
+
+        `_done` membership is the single guard against duplicate writes: WLK
+        resends the whole `lines` list continuously, so without it the same
+        sentence would be appended on every update.
+        """
+        self._done.add(text)
+        if not config.subtitle_file:
+            return
+        try:
+            with open(config.subtitle_file, "a", encoding="utf-8") as fh:
+                # Tab-separated so the overlay can split english/chinese. Any
+                # tab or newline inside the text itself would corrupt the
+                # record, so collapse them to spaces.
+                en = " ".join(text.split())
+                zh_clean = " ".join(zh.split())
+                fh.write(f"{en}\t{zh_clean}\n")
+        except OSError:
+            logger.warning("Failed to append to subtitle file", exc_info=True)
+
     async def ensure(self, text: str) -> None:
         """Kick off translation for `text` if not already done/in-flight."""
         key = text.strip()
@@ -75,7 +96,7 @@ class Translator:
                 zh = await asyncio.to_thread(self._translate, key)
                 if zh:
                     self._cache[key] = zh
-                    self._done.add(key)
+                    self._finalize(key, zh)
         finally:
             self._inflight.discard(key)
 
@@ -102,8 +123,9 @@ class Translator:
                 stripped = acc.strip()
                 if stripped:
                     self._cache[text] = stripped
-            if self._cache.get(text):
-                self._done.add(text)
+            final = self._cache.get(text)
+            if final:
+                self._finalize(text, final)
         except Exception:  # noqa: BLE001 - never crash the transcript path
             logger.exception("Bedrock streaming translation failed")
             # Drop the partial so the line is retried on a later WLK update.

@@ -8,6 +8,14 @@
   --c3po-accent: #0071e3;
 }
 
+/* Floating-subtitle toggle. Sizing, shape and theme come from WLK's
+   .settings-toggle; only the inline SVG needs sizing and colour. */
+#c3po-overlay-toggle svg {
+  width: 20px;
+  height: 20px;
+  color: var(--text);
+}
+
 #c3po-panel {
   position: fixed;
   top: 0;

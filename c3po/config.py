@@ -119,6 +119,23 @@ class Config:
     # half the full-completion latency, so this halves perceived subtitle delay.
     translate_streaming: bool = os.getenv("C3PO_TRANSLATE_STREAMING", "1") == "1"
 
+    # --- Floating subtitle overlay (native macOS window) ---
+    # Finalized "english<TAB>chinese" pairs are appended here; the overlay tails
+    # the file. Only completed translations are written, never streaming
+    # partials, or the overlay would flicker through half sentences.
+    subtitle_file: str = os.getenv("C3PO_SUBTITLE_FILE", "/tmp/c3po-subtitles.txt")
+
+    # Launch the overlay as a child process alongside the server.
+    overlay_enabled: bool = os.getenv("C3PO_OVERLAY", "1") == "1"
+
+    # Presence of this file means "overlay visible". The web button creates and
+    # removes it; the overlay polls it on its existing refresh timer. A flag
+    # file is used rather than signals because POSIX signal handlers interact
+    # badly with the PyObjC run loop.
+    overlay_visible_flag: str = os.path.expanduser(
+        "~/Library/Application Support/meeting-translator/overlay-visible"
+    )
+
     # The suggestion call is split into a fast short-replies call and a slower
     # full-answer call so the time-critical short cards render first (see
     # Suggester._generate). Separate, tighter token budgets keep each call as
