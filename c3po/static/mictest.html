@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Mic level test</title>
+<style>
+body{font-family:-apple-system,sans-serif;padding:24px;background:#111;color:#eee}
+#bar{height:28px;background:#2a2a2a;border-radius:4px;overflow:hidden;margin:8px 0 16px}
+#fill{height:100%;width:0;background:linear-gradient(90deg,#4ade80,#facc15,#ef4444);transition:width .05s}
+table{border-collapse:collapse;margin-top:12px;font-size:13px}
+td,th{border:1px solid #333;padding:6px 10px;text-align:left}
+.ok{color:#4ade80}.bad{color:#ef4444}
+select,button{font-size:14px;padding:6px 10px;margin-right:8px}
+</style></head>
+<body>
+<h2>浏览器麦克风电平测试</h2>
+<p>选择设备后点「开始」。如果条不动、峰值一直是 0，说明浏览器从该设备录不到声音。</p>
+
+<div>
+  <select id="dev"></select>
+  <button id="go">开始</button>
+  <button id="stop">停止</button>
+</div>
+
+<div id="bar"><div id="fill"></div></div>
+<div>当前电平: <b id="cur">-</b> &nbsp;|&nbsp; 峰值: <b id="peak">-</b> &nbsp;|&nbsp; <span id="verdict"></span></div>
+
+<table id="info"><tr><th>项目</th><th>值</th></tr></table>
+
+<script>
+const $ = id => document.getElementById(id);
+let ctx, stream, raf, peak = 0;
+
+function row(k, v, cls) {
+  const tr = $('info').insertRow();
+  tr.insertCell().textContent = k;
+  const c = tr.insertCell();
+  c.textContent = v;
+  if (cls) c.className = cls;
+}
+
+async function listDevices() {
+  // 需要先授权一次才能拿到设备名
+  try { (await navigator.mediaDevices.getUserMedia({audio:true})).getTracks().forEach(t=>t.stop()); } catch(e) {}
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+  $('dev').innerHTML = devs.map(d =>
+    `<option value="${d.deviceId}">${d.label || '(未命名)'} ${d.deviceId==='default'?'[default]':''}</option>`
+  ).join('');
+  row('检测到输入设备数', devs.length);
+  devs.forEach((d,i) => row(`设备 ${i}`, `${d.label} | id=${d.deviceId.slice(0,20)}`));
+}
+
+async function start() {
+  stop();
+  peak = 0;
+  const id = $('dev').value;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { deviceId: { exact: id }, echoCancellation:false, noiseSuppression:false, autoGainControl:false }
+    });
+  } catch (e) {
+    row('getUserMedia 失败', e.name + ': ' + e.message, 'bad');
+    return;
+  }
+  const track = stream.getAudioTracks()[0];
+  row('实际拿到的轨道', track.label, 'ok');
+  const s = track.getSettings();
+  row('轨道设置', `deviceId=${(s.deviceId||'').slice(0,20)} sampleRate=${s.sampleRate} channels=${s.channelCount}`);
+
+  ctx = new AudioContext();
+  const src = ctx.createMediaStreamSource(stream);
+  const an = ctx.createAnalyser();
+  an.fftSize = 2048;
+  src.connect(an);
+  const buf = new Float32Array(an.fftSize);
+
+  (function loop() {
+    an.getFloatTimeDomainData(buf);
+    let m = 0;
+    for (const v of buf) m = Math.max(m, Math.abs(v));
+    const pct = Math.min(100, m * 300);
+    $('fill').style.width = pct + '%';
+    $('cur').textContent = m.toFixed(4);
+    peak = Math.max(peak, m);
+    $('peak').textContent = peak.toFixed(4);
+    $('verdict').innerHTML = peak > 0.01
+      ? '<span class="ok">有信号 ✓</span>'
+      : '<span class="bad">静音 ✗</span>';
+    raf = requestAnimationFrame(loop);
+  })();
+}
+
+function stop() {
+  if (raf) cancelAnimationFrame(raf);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (ctx) ctx.close();
+  stream = ctx = null;
+}
+
+$('go').onclick = start;
+$('stop').onclick = stop;
+listDevices();
+</script>
+</body>
+</html>

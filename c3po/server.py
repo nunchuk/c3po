@@ -1,0 +1,352 @@
+"""c3po FastAPI server.
+
+Single process that:
+  - embeds WhisperLiveKit's STT + NLLW (EN->ZH) pipeline (see WLK basic_server.py)
+  - serves WLK's built-in UI with an injected reply-suggestion panel
+  - runs a background task that continuously regenerates English reply suggestions
+    on Amazon Bedrock (Claude Haiku 4.5) and pushes them to the panel via WebSocket
+
+The transcription/translation UI is WLK's own; we only add the suggestion panel.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from c3po.config import config
+
+# Point urllib/requests at the system cert bundle BEFORE importing whisperlivekit,
+# so its model downloads survive corporate SSL interception. Must run before the
+# whisperlivekit import below triggers any network access.
+if config.ssl_cert_file and os.path.exists(config.ssl_cert_file):
+    os.environ.setdefault("SSL_CERT_FILE", config.ssl_cert_file)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", config.ssl_cert_file)
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import HTMLResponse  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+
+from whisperlivekit import (  # noqa: E402
+    AudioProcessor,
+    TranscriptionEngine,
+    get_inline_ui_html,
+)
+from whisperlivekit.config import WhisperLiveKitConfig  # noqa: E402
+
+from c3po import mlx_thread_fix, segment_fix  # noqa: E402
+from c3po.suggester import Suggester  # noqa: E402
+from c3po.translator import Translator  # noqa: E402
+
+# Patch MLX so transcription works on WLK's worker threads (no-op for non-MLX).
+if config.backend == "mlx-whisper":
+    mlx_thread_fix.apply()
+
+# Split transcript lines on sentence punctuation. Safe now that translation is
+# done by c3po (Bedrock) per-sentence rather than WLK's NLLW — there's no longer
+# a timestamp-coupled translation to break. No-op if diarization is on.
+if not config.diarization:
+    segment_fix.apply()
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("c3po")
+logger.setLevel(logging.INFO)
+
+# Shared singletons, initialized in lifespan.
+transcription_engine: TranscriptionEngine | None = None
+suggester: Suggester | None = None
+translator: Translator | None = None
+
+_PANEL_DIR = Path(__file__).parent / "static"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Build the shared transcription engine and start the suggestion loop."""
+    global transcription_engine, suggester, translator
+
+    # No target_language: WLK only transcribes. c3po translates each finalized
+    # English sentence on Bedrock (see translator.py), which frees NLLB's ~1.5GB
+    # and decouples translation from segmentation.
+    wlk_config = WhisperLiveKitConfig.from_kwargs(
+        model_size=config.whisper_model,
+        lan=config.source_language,
+        backend=config.backend,
+        diarization=config.diarization,
+        buffer_trimming_sec=config.buffer_trimming_sec,
+        host=config.host,
+        port=config.port,
+    )
+    transcription_engine = TranscriptionEngine(config=wlk_config)
+
+    suggester = Suggester()
+    suggester.start()
+    translator = Translator()
+    logger.info("c3po ready: whisper=%s translate=bedrock backend=%s",
+                config.whisper_model, config.backend)
+    try:
+        yield
+    finally:
+        if suggester is not None:
+            await suggester.stop()
+
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _render_index() -> str:
+    """Return WLK's UI with the c3po suggestion panel injected before </body>."""
+    html = get_inline_ui_html()
+
+    # WLK's UI hardcodes `ws://localhost:8000/asr`. When c3po runs on any other
+    # port the recorder connects to nothing and the session dies after a second,
+    # with no transcript. Rewrite it to the port we actually serve on, derived
+    # from the page's own origin so it also works over a tunnel or LAN IP.
+    html = html.replace(
+        'let websocketUrl = "ws://localhost:8000/asr";',
+        'let websocketUrl = `${location.protocol === "https:" ? "wss" : "ws"}'
+        '://${location.host}/asr`;',
+        1,
+    )
+
+    # Meeting audio arrives through BlackHole, which Chrome treats as a
+    # microphone and then "cleans up": auto gain control decides the loopback
+    # signal is noise and fades it out (measured: -45 dB -> -91 dB within
+    # seconds), so the transcript stays empty. Disable the three voice-input
+    # processors for every capture path in WLK's UI.
+    raw_audio = (
+        "{ audio: { deviceId: { exact: selectedMicrophoneId },"
+        " echoCancellation: false, noiseSuppression: false,"
+        " autoGainControl: false } }"
+    )
+    html = html.replace(
+        "{ audio: { deviceId: { exact: selectedMicrophoneId } } }",
+        raw_audio,
+    )
+    html = html.replace(
+        ": { audio: true };",
+        ": { audio: { echoCancellation: false, noiseSuppression: false,"
+        " autoGainControl: false } };",
+    )
+
+    panel_css = (_PANEL_DIR / "panel.css").read_text(encoding="utf-8")
+    panel_js = (_PANEL_DIR / "panel.js").read_text(encoding="utf-8")
+    injection = f"<style>{panel_css}</style>\n<script>{panel_js}</script>\n"
+    if "</body>" in html:
+        return html.replace("</body>", injection + "</body>", 1)
+    return html + injection
+
+
+@app.get("/")
+async def index() -> HTMLResponse:
+    return HTMLResponse(_render_index())
+
+
+class ClientLog(BaseModel):
+    msg: str
+
+
+@app.post("/clientlog")
+async def clientlog(entry: ClientLog) -> dict:
+    """Diagnostic sink: surface browser-side messages in the server log."""
+    logger.info("[browser] %s", entry.msg)
+    return {"ok": True}
+
+
+@app.get("/mictest")
+async def mictest() -> HTMLResponse:
+    """Diagnostic page: shows the live input level per audio device.
+
+    Use it when no transcript appears, to tell "the browser is capturing
+    silence" apart from "the server pipeline is broken".
+    """
+    path = _PANEL_DIR / "mictest.html"
+    if not path.exists():
+        return HTMLResponse("mictest.html not found", status_code=404)
+    return HTMLResponse(path.read_text(encoding="utf-8"))
+
+
+# --- Context panel API ---
+
+
+class ContextBody(BaseModel):
+    context: str = ""
+
+
+@app.post("/context")
+async def set_context(body: ContextBody) -> dict:
+    assert suggester is not None
+    suggester.set_context(body.context)
+    return {"ok": True}
+
+
+@app.post("/refresh")
+async def force_refresh() -> dict:
+    """Manual immediate regeneration (panel button / hotkey)."""
+    assert suggester is not None
+    suggester.force_refresh()
+    return {"ok": True}
+
+
+# --- Suggestions WebSocket (server -> panel) ---
+
+
+@app.websocket("/suggestions")
+async def suggestions_ws(websocket: WebSocket) -> None:
+    assert suggester is not None
+    await websocket.accept()
+    queue = suggester.subscribe()
+    try:
+        while True:
+            payload = await queue.get()
+            await websocket.send_json(payload)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        suggester.unsubscribe(queue)
+
+
+# --- ASR WebSocket (browser mic -> WLK; also feeds the rolling buffer) ---
+
+
+def _ingest_front_data(payload: dict) -> None:
+    """Extract finalized lines from a WLK FrontData dict into the buffer.
+
+    Only newly-finalized lines are appended (dedup by count) so the suggester
+    sees each line once. `lines` holds finalized segments; `buffer_transcription`
+    is the still-changing tail and is intentionally ignored here.
+    """
+    assert suggester is not None
+    lines = payload.get("lines") or []
+    state = suggester.state
+    # WLK resends the full `lines` list each update; append only the unseen tail.
+    seen = getattr(state, "_ingested_line_count", 0)
+    for line in lines[seen:]:
+        text = (line.get("text") or "").strip()
+        if text:
+            state.add_line(text, speaker=line.get("speaker", -1))
+    state._ingested_line_count = len(lines)  # type: ignore[attr-defined]
+
+
+def _inject_translations(payload: dict) -> None:
+    """Fill each line's `translation` from the Bedrock translator cache, and
+    kick off translation for any line not yet translated.
+
+    WLK no longer translates (no target_language), so `lines[].translation` is
+    absent; we populate it. Cached Chinese is injected immediately; uncached
+    lines get a background translation that shows up on the next WLK update
+    (WLK resends the full lines list continuously).
+    """
+    assert translator is not None
+    for line in payload.get("lines") or []:
+        text = (line.get("text") or "").strip()
+        if not text:
+            continue
+        zh = translator.get_cached(text)
+        if zh:
+            line["translation"] = zh
+        else:
+            # Schedule translation; result lands in cache for a later update.
+            asyncio.create_task(translator.ensure(text))
+
+
+async def _handle_results(websocket: WebSocket, results_generator) -> None:
+    """Forward WLK results to the browser AND tap them into the buffer."""
+    try:
+        async for response in results_generator:
+            payload = response.to_dict()
+            _ingest_front_data(payload)
+            _inject_translations(payload)
+            await websocket.send_json(payload)
+        await websocket.send_json({"type": "ready_to_stop"})
+    except WebSocketDisconnect:
+        logger.info("ASR results consumer: client disconnected")
+    except Exception:  # noqa: BLE001
+        logger.exception("Error while handling ASR results")
+
+
+@app.websocket("/asr")
+async def asr_ws(websocket: WebSocket) -> None:
+    assert transcription_engine is not None
+    audio_processor = AudioProcessor(transcription_engine=transcription_engine)
+    await websocket.accept()
+    logger.info("ASR WebSocket opened")
+
+    # WLK's frontend waits for this config message to decide how to send audio
+    # (AudioWorklet/PCM vs MediaRecorder/WebM). Mirror basic_server.py — without
+    # it the recorder never starts streaming and FFmpeg times out.
+    try:
+        await websocket.send_json(
+            {"type": "config", "useAudioWorklet": bool(getattr(
+                transcription_engine.config, "pcm_input", False))}
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to send config to ASR client", exc_info=True)
+
+    results_generator = await audio_processor.create_tasks()
+    results_task = asyncio.create_task(_handle_results(websocket, results_generator))
+
+    # Debug aid: set C3PO_DUMP_AUDIO=/path/to/dump.webm to save exactly what the
+    # browser sends, so a silent/undecodable stream can be inspected offline.
+    dump_path = os.getenv("C3PO_DUMP_AUDIO")
+    dump = open(dump_path, "wb") if dump_path else None
+
+    try:
+        while True:
+            message = await websocket.receive_bytes()
+            if dump:
+                dump.write(message)
+                dump.flush()
+            await audio_processor.process_audio(message)
+    except KeyError as exc:
+        if "bytes" in str(exc):
+            logger.info("ASR client closed the connection")
+        else:
+            logger.exception("Unexpected KeyError in ASR loop")
+    except WebSocketDisconnect:
+        logger.info("ASR WebSocket disconnected")
+    except Exception:  # noqa: BLE001
+        logger.exception("Unexpected error in ASR loop")
+    finally:
+        if dump:
+            dump.close()
+            logger.info("Audio dump written to %s", dump_path)
+        if not results_task.done():
+            results_task.cancel()
+            try:
+                await results_task
+            except asyncio.CancelledError:
+                pass
+        await audio_processor.cleanup()
+        logger.info("ASR WebSocket cleaned up")
+
+
+def main() -> None:
+    """CLI entry point."""
+    import uvicorn
+
+    print(f"c3po: {config.url}")
+    uvicorn.run(
+        "c3po.server:app",
+        host=config.host,
+        port=config.port,
+        lifespan="on",
+        log_level="info",
+    )
+
+
+if __name__ == "__main__":
+    main()

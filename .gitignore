@@ -1,0 +1,32 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Secrets / local config
+# Cover backups/variants too: a stray .env.bak still holds a live Bedrock key.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Models / caches downloaded at runtime
+models/
+*.gguf
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Generated icon (rebuild with: .venv/bin/python scripts/make-icon.py)
+assets/c3po.icns
+
+# Audio capture dumps from C3PO_DUMP_AUDIO debugging
+*.webm

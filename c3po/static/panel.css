@@ -1,0 +1,183 @@
+/* c3po reply-suggestion panel, injected into the WhisperLiveKit page.
+   Fixed to the right edge. Styled with WLK's own CSS variables (--bg, --text,
+   --border, --chip-bg, --button-* ) so it matches WLK's look and follows its
+   light/dark theme automatically. */
+
+:root {
+  --c3po-width: 420px;
+  --c3po-accent: #0071e3;
+}
+
+#c3po-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: var(--c3po-width);
+  height: 100vh;
+  box-sizing: border-box;
+  padding: 20px;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji",
+    "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  font-size: 15px;
+  color: var(--text);
+  /* WLK's body is text-align:center; force everything in the panel left. */
+  text-align: left;
+  overflow-y: auto;
+  scrollbar-width: none;
+  z-index: 9999;
+}
+#c3po-panel * {
+  text-align: left;
+}
+#c3po-panel::-webkit-scrollbar {
+  display: none;
+}
+
+/* Make room for the panel so it doesn't overlap WLK's transcript. */
+body {
+  padding-right: var(--c3po-width);
+}
+
+/* --- Stabilize WLK's transcript area against jitter (unrelated to panel look) ---
+   WLK applies `transition: all`, so every size change animates — combined with
+   async Chinese filling in, the page slides/jumps. Kill transitions there. */
+.transcript-container,
+.transcript-container * {
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+#linesTranscript p {
+  margin: 0 0 10px !important;
+}
+.label_translation {
+  margin-top: 4px;
+}
+
+/* --- Panel header --- */
+#c3po-panel h2 {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+/* --- Context editor --- */
+#c3po-context {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 64px;
+  resize: vertical;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  font: inherit;
+  background: var(--button-bg);
+  color: var(--text);
+}
+#c3po-context:focus {
+  outline: none;
+  border-color: var(--c3po-accent);
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.15);
+}
+
+#c3po-context-row {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 18px;
+}
+
+/* Small pill buttons matching WLK's white+border style. Compact (not full
+   width) so they read as neat little chips rather than big bars. */
+.c3po-btn {
+  border: 1px solid var(--button-border);
+  border-radius: 999px;
+  padding: 9px 22px;
+  font: inherit;
+  font-size: 15px;
+  cursor: pointer;
+  background: var(--button-bg);
+  color: var(--text);
+  transition: all 0.2s ease;
+}
+.c3po-btn:hover {
+  background: var(--chip-bg);
+}
+.c3po-btn:active {
+  transform: scale(0.96);
+}
+
+#c3po-status {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+
+#c3po-question-flag {
+  display: none;
+  background: rgba(255, 159, 10, 0.16);
+  color: var(--text);
+  border: 1px solid rgba(255, 159, 10, 0.4);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  font-weight: 600;
+}
+#c3po-question-flag.active {
+  display: block;
+}
+
+/* --- Suggestion cards (uniform style for short and full-answer alike) --- */
+.c3po-card {
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  background: var(--chip-bg);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.c3po-card:hover {
+  border-color: var(--c3po-accent);
+  background: rgba(0, 113, 227, 0.08);
+}
+
+/* Card title: English angle + Chinese hint together, e.g. "BUY TIME · 争取时间". */
+.c3po-card .angle {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.c3po-card .text {
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.c3po-card.copied {
+  background: rgba(52, 199, 89, 0.18);
+  border-color: rgba(52, 199, 89, 0.5);
+}
+
+/* --- Transcript scroll stability ---------------------------------------
+   WLK rebuilds the transcript with innerHTML on every update, several times a
+   second. Two things here keep that from showing up as jitter:
+   - overflow-anchor: none disables Chrome's scroll anchoring, which otherwise
+     competes with our own pin-to-bottom logic in panel.js.
+   - overscroll-behavior contains rubber-banding so a rebuild at the bottom edge
+     cannot bounce the view. */
+.transcript-container {
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+}
+
+/* Soften the visual pop when a line is rewritten (Whisper revises text as it
+   hears more, and the Chinese translation lands seconds later). */
+#linesTranscript p {
+  transition: opacity 120ms ease-out;
+}
