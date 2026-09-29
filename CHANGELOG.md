@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+### Fixed — a cold start looked like the app was not launching (2026-09-30)
+
+Reported as "C-3PO.app does not start any more". It was in fact starting: the
+server came up and answered on 8989 every time. The defect is that nothing says
+so. The app is `LSUIElement`, so there is no Dock icon, no window and no terminal,
+and the Whisper model takes ~80s to load before the port binds — 80 seconds of
+total silence is indistinguishable from a failed launch.
+
+- Post a macOS notification when startup begins, so the wait is visibly a wait.
+  Non-blocking, unlike a dialog, and best-effort so a denied notification cannot
+  stop the launch.
+- `READY_TIMEOUT` 90s to 180s. 80s measured against a 90s limit left 10s of
+  headroom; a machine under load would have tripped it and reported a failure for
+  a server that was merely slow.
+- Corrected the message and comment: the model loads on *every* start, not only
+  the first, so "first run" was misleading about how long to expect.
+
 ### Added — a way to stop c3po (2026-09-30)
 
 Closing the browser only drops the WebSocket: the server stayed up (~41 MB RSS,

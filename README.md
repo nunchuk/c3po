@@ -101,6 +101,10 @@ a running server, starts one if needed, waits until it is ready, and opens the
 page. If anything fails it shows a dialog with the diagnosis — a double-clicked
 app has no terminal, so a silent failure would just look broken.
 
+**A cold start takes ~80 seconds** (the Whisper model is loaded on every start,
+not just the first). You get a notification when it begins, then the browser opens
+on its own. If the server is already up the page opens immediately.
+
 It also creates **C-3PO Quit.app** for stopping everything — see "Stopping c3po".
 
 The apps are thin wrappers around `scripts/c3po-open.sh` and

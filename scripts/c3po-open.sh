@@ -18,12 +18,20 @@ DISPLAY_HOST="${C3PO_DISPLAY_HOST:-localhost}"
 URL="http://${DISPLAY_HOST}:${PORT}"
 SERVER_LOG="$HOME/.c3po-server.log"
 
-# The first start loads the Whisper model before binding the port; measured at
-# 30-60s on an M4. Poll instead of sleeping a fixed amount.
-READY_TIMEOUT=90
+# The server loads the Whisper model before binding the port; measured at 80s on
+# this machine (not just the first run -- the model is re-loaded every start).
+# Poll instead of sleeping a fixed amount, and keep generous headroom: a machine
+# under load is slower, and a timeout here looks like "the app is broken".
+READY_TIMEOUT=180
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
+
+# Non-blocking macOS notification. Best-effort: never let a missing/denied
+# notification stop the launch.
+notify() {
+  osascript -e "display notification \"$2\" with title \"$1\"" 2>/dev/null || true
+}
 
 # --noproxy '*' is required: with a proxy configured, curl to localhost returns
 # HTTP 000 and the server looks dead when it is fine.
@@ -55,7 +63,13 @@ else
   fi
 
   # ---------- 3. start the server ----------
-  info "Starting c3po server (first run loads the Whisper model, up to ${READY_TIMEOUT}s)..."
+  info "Starting c3po server (loads the Whisper model, ~80s)..."
+
+  # Tell the user something is happening. The app is LSUIElement, so there is no
+  # Dock icon, no window and no terminal -- an 80s silent wait is indistinguishable
+  # from "the app did not launch". Notifications are non-blocking, unlike a dialog.
+  notify "C-3PO" "Starting up -- the page opens in about 80 seconds."
+
   cd "$REPO" || die "cannot cd to $REPO"
 
   # .venv/bin/python is a universal binary. From a terminal it runs arm64, but a
