@@ -131,15 +131,24 @@ In the page:
 server keeps running (~41 MB), holds port 8989, and keeps the subtitle-overlay
 child process alive.
 
-Double-click **C-3PO Quit.app**, or:
+Three ways to quit, all ending in the same clean shutdown:
 
-```bash
-bash scripts/c3po-quit.sh
-```
+- **The power button in the page**, next to the subtitle toggle (asks for
+  confirmation first — quitting mid-meeting means waiting ~80s to get back).
+- **C-3PO Quit.app** — double-click, no terminal needed.
+- ```bash
+  bash scripts/c3po-quit.sh
+  ```
 
-It sends `SIGTERM` so the server runs its shutdown handler (stop the suggester,
-terminate the overlay child, clear the overlay flag), waits for a clean exit, and
-only escalates to `SIGKILL` if that stalls. A clean shutdown takes ~15s.
+All three send `SIGTERM` so the server runs its shutdown handler (stop the
+suggester, terminate the overlay child, clear the overlay flag). The script waits
+for a clean exit and only escalates to `SIGKILL` if that stalls. Shutdown takes
+7–15s.
+
+The page's button posts to `/shutdown`, which signals the process rather than
+exiting from the request handler — exiting inline would skip the handler and leave
+the always-on-top overlay orphaned. The response is sent before the signal, so the
+page can report success instead of seeing a dropped connection.
 
 Avoid `kill -9` / `pkill -9` yourself: the handler never runs, and the overlay is
 an always-on-top window that then cannot be closed from the UI. If that does

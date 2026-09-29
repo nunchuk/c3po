@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+### Added — power button in the page (2026-09-30)
+
+Quitting still required leaving the page (Quit.app or the shell script), so closing
+the browser kept leaking a running server holding port 8989.
+
+A power button sits next to the subtitle toggle, reusing WLK's `.settings-toggle`
+class so the circle, theme colours and hover state stay consistent with no
+duplicated styling. It confirms first: quitting mid-meeting costs the ~80s model
+reload to come back.
+
+It posts to `/shutdown`, which **signals the process instead of exiting from the
+request handler** — an inline exit would skip the lifespan shutdown handler, and
+that handler is what terminates the overlay child. Skipping it orphans an
+always-on-top window that cannot then be closed from the UI. The signal is
+scheduled on the event loop after a 0.3s delay so the response flushes first,
+letting the page distinguish a successful shutdown from a crash. Measured: 7s to
+a full clean exit, with `Subtitle overlay stopped` confirming the handler ran.
+
 ### Fixed — a cold start looked like the app was not launching (2026-09-30)
 
 Reported as "C-3PO.app does not start any more". It was in fact starting: the
