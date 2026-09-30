@@ -5,6 +5,157 @@
 
 ## [Unreleased]
 
+### Added — waveform and Save Transcript in the app toolbar (2026-09-30)
+
+- **Waveform.** Hiding the page's button row also hid WLK's waveform, which lives
+  inside its record button and was the only sign that audio is arriving. The
+  toolbar now draws one next to Record / Stop: `panel.js` reads WLK's
+  `analyser` (a top-level binding in `live_transcription.js`, visible to our
+  script, so no fork) every 50ms while recording and posts 48 points. Measured
+  in WKWebView: 484 frames over a ~25s recording (19.4/s). Samples are boosted
+  ×4 and soft-clipped with tanh: raw speech peaks at only ~0.10 of full scale
+  (p90), which drew a nearly flat line; displayed now at 0.39 (p90) / 0.89 (max).
+- **Save Transcript** (toolbar, ⌘S) writes the English transcript to a `.txt`
+  via a save panel, for meeting notes with Claude afterwards. The server keeps it
+  in `TranscriptLog`, served at `GET /transcript`: per recording session the
+  latest full `lines[].text` (+ uncommitted tail), since WLK resends every line
+  and grows the current one in place. Sessions since the server started are kept,
+  so a Stop / Record mid-meeting does not lose the first half.
+
+### Fixed — reply suggestions only saw the first fragment of each sentence (2026-09-30)
+
+`_ingest_front_data` appended a line the first time it appeared and never looked
+at it again, but WLK grows the newest line in place. Replaying WLK-shaped payloads
+through it, the suggestion buffer held `'Today we will'` for "Today we will
+discuss the timeline." and flagged the fragment `'Can you'` as the question
+instead of "Can you send me the estimates by Friday?". Its line counter also
+lived on the shared state while WLK numbers lines from zero after Stop / Record,
+so the start of every later session was skipped ("Second session starts here."
+never reached the buffer).
+
+Lines are now tracked per recording session and refreshed in place when their
+text changes (`SuggestionState.update_line`). A refresh counts as new content
+(fallback timer, question check) but not as a new line, so the new-lines trigger
+still counts sentences. The same replay after the fix: full sentences, the full
+question, and the second session's first line.
+
+### Changed — newest-first transcript without speaker/time labels (2026-09-30)
+
+- `#linesTranscript` is `column-reverse`, so the latest sentence sits under the
+  toolbar. WLK writes `<p>meta<br/><div class='textcontent'>...</div></p>`; the
+  parser closes the `<p>` at the `<div>`, so each line is sibling nodes and
+  reversing them keeps each sentence with its translation. `tameScrolling`
+  follows the top instead of the bottom and, while the reader is scrolled into
+  history, shifts the position by the growth. Checked through WLK's own
+  `renderLinesWithBuffer`: from 400px down, two new lines moved scrollTop to 582
+  (text under the reader unchanged); from 30px, it eased back to 0.
+- Hidden: speaker icon and number, time range, language chip, and silence rows
+  (no diarization, so they carry nothing when reading). Lag indicators stay.
+- In the app, WLK's routine status messages ("Finished processing audio! Ready
+  to record again.") are hidden: the window subtitle already shows the state.
+  Its error messages still show, as a small red footer. Every WLK error message
+  contains "error", "invalid", "disconnected" or "could not", and none of its
+  routine ones do; checked against all 21 `statusText` assignments in
+  `live_transcription.js`.
+
+### Added — C-3PO.app is a native window (2026-09-30)
+
+c3po no longer needs a browser tab. `macos/C3PO.swift` (compiled by
+`make-overlay-app.sh`) is an AppKit window with a macOS 26 toolbar — Record /
+Stop, plus a Settings / Subtitles / Suggestions toggle group — hosting the server's
+page in a WKWebView. It starts the server as its child through the new
+`c3po-open.sh --serve` (same preflight and arm64 pinning, then `exec`, so SIGTERM
+reaches uvicorn directly), shows startup progress in the window, and stops the
+server on quit.
+
+- The toolbar presses the page's own buttons through `window.c3poNative`, and the
+  page reports their state back through a `c3po` message handler (`panel.js`). WLK
+  keeps the only recording code path; `.c3po-native` just hides the button row.
+- Swift rather than PyObjC or pywebview, both of which were tried: python.org
+  Python's main bundle is `Python.app`, so a PyObjC window shows as "Python" in the
+  menu bar, Dock and ⌘Tab; pywebview implements no
+  `requestMediaCapturePermission`, so `getUserMedia` is silently refused. Electron
+  would add a ~200 MB runtime for a toolbar that is not native.
+- The bundle carries `NSMicrophoneUsageDescription` and an ad-hoc signature, so the
+  microphone grant belongs to C-3PO.app and has a stable identity to attach to.
+- Quitting (⌘Q or closing the window) asks first while recording, like the page's
+  power button did. Before the model has loaded the app SIGKILLs the server:
+  uvicorn only acts on SIGTERM after startup, so a SIGTERM there would stall the
+  quit for up to a minute. View > Reload Page (⌘R, idle only) re-runs the page,
+  e.g. after granting microphone access in System Settings.
+- `C3PO_PARENT_PID`: the server compares `getppid()` against it every second and
+  shuts down gracefully once the app is gone, so a crashed or force-quit app no
+  longer leaves the server holding the port with the overlay up. Measured: after
+  `kill -9` of the app, the server logged "Parent app ... is gone", stopped the
+  overlay and exited within 1.0s.
+
+### Changed — audio is captured as PCM, not MediaRecorder chunks (2026-09-30)
+
+`pcm_input` is now on by default (`C3PO_PCM_INPUT=0` restores the old path), so
+WLK's AudioWorklet streams raw 16 kHz PCM and the server no longer runs ffmpeg.
+
+Required by the native window: WebKit's MediaRecorder accepts WLK's
+`start(100)` but ignores the 100ms timeslice — measured 20 chunks in 20s, each
+~3.7 KB of Opus, i.e. one-second chunks that would add up to a second of subtitle
+lag. The worklet path posts 128-frame quanta: measured 375 messages/s at 48000
+samples/s in WKWebView, unchanged while the window was minimized for 30s.
+Chrome takes the same path (not measured there). No `/web` mount is needed:
+`get_inline_ui_html()` already inlines the worklet and worker as Blob URLs.
+The ffmpeg preflight check now only runs with `C3PO_PCM_INPUT=0`.
+
+- BlackHole is stereo, and WLK's worklet forwards channel 0 only, whereas ffmpeg
+  mixed both down. `_render_index` now makes the node downmix (L+R)/2
+  (`channelCountMode: "explicit"`). A/B with `say` into BlackHole: 2 identical
+  channels in, -28.3 dB either way, so centred speech loses nothing.
+- WebKit starts capture only while the page is visible. With the test window
+  covered by another window, one session sent 0 audio chunks and another started
+  8.6s late (the sentence's first half was lost); in front, two runs in a row got
+  the full 23.9s. Once running, capture continues hidden or minimized.
+- End to end in WKWebView: "Hello everyone. Today we will discuss the migration
+  timeline for the third quarter." came back with 大家好。今天我们将讨论第三季度的迁移时间表。
+
+### Fixed — Script Editor opened when launching C-3PO.app (2026-09-30)
+
+The startup notification added earlier today was the cause. `osascript -e
+'display notification'` is attributed to Script Editor, and clicking the banner
+launches it with an empty Untitled document. Unified log:
+
+    07:21:36 usernoted: Connection com.apple.ScriptEditor2 with path: /usr/bin/osascript
+    07:21:50 usernoted: Received response <NotificationRecord app:"com.apple.ScriptEditor2" ...
+             <response action: contents ...>
+    07:21:50 usernoted: Checking ... for launch of com.apple.ScriptEditor2
+
+The notification is gone; the native window shows startup progress instead, so
+nothing in the launch path uses osascript any more.
+
+### Fixed — shutdown hung until SIGKILL while a page was connected (2026-09-30)
+
+`c3po-quit.sh` kept escalating to SIGKILL, and a server started at 07:32 was still
+alive hours later with its port already closed (invisible to the quit script,
+which finds the server by its listening port). Its log ended at `Waiting for
+background tasks to complete`: the `/suggestions` handler waited on its queue and
+never noticed its page had gone, and uvicorn's graceful shutdown waits for every
+handler, forever by default. SIGKILL then skipped the lifespan shutdown too.
+
+The handler now also waits on `receive_text()` (the page never sends there), so it
+ends when the socket closes; `timeout_graceful_shutdown=5` cancels anything else
+that still blocks, so the lifespan shutdown always runs. This matters for the app:
+its page is connected whenever it quits.
+
+### Fixed — `requirements.txt` was missing boto3 (2026-09-30)
+
+The subtitle translator moved to the Bedrock Converse API (boto3) in the overlay
+commit, but boto3 was only present because it happened to be installed; a fresh
+`pip3 install -r requirements.txt` would fail at import. Pinned to the installed
+1.43.32.
+
+### Fixed — the overlay stacked every partial version of a sentence (2026-09-30)
+
+WLK grows the current line word by word and each version is translated and
+appended, so one sentence showed up as a pile of near-duplicates ("Today we will"
+/ "Today we will discuss" / ...). A record whose English extends the previous one
+now replaces it. On a real 2-sentence test file: 11 records, 2 displayed.
+
 ### Added — power button in the page (2026-09-30)
 
 Quitting still required leaving the page (Quit.app or the shell script), so closing

@@ -24,6 +24,10 @@ class Config:
     port: int = int(os.getenv("C3PO_PORT", "8989"))
     # Hostname shown in the URL / opened in the browser.
     display_host: str = os.getenv("C3PO_DISPLAY_HOST", "localhost")
+    # PID of the app that started the server (set by C-3PO.app). If that app
+    # dies without a clean quit, the server shuts itself down instead of holding
+    # the port with the overlay still on screen. 0 = no parent to watch.
+    parent_pid: int = int(os.getenv("C3PO_PARENT_PID", "0"))
 
     @property
     def url(self) -> str:
@@ -67,6 +71,14 @@ class Config:
     # (~1.25s latency, comfortably real-time). Set C3PO_BACKEND=mlx-whisper
     # only if you want max transcription speed and DON'T need translation.
     backend: str = os.getenv("C3PO_BACKEND", "faster-whisper")
+
+    # Audio capture path. On (default): WLK's AudioWorklet streams raw 16 kHz
+    # PCM. Off: MediaRecorder sends WebM/Opus, decoded server-side by ffmpeg.
+    # C-3PO.app needs PCM: WebKit's MediaRecorder ignores WLK's 100ms timeslice
+    # and delivers ~1s chunks (measured: 20 chunks in 20s), which adds up to a
+    # second of subtitle lag. The worklet posts 128-frame quanta (measured: 375
+    # msgs/s, unchanged with the window minimized) and needs no ffmpeg.
+    pcm_input: bool = os.getenv("C3PO_PCM_INPUT", "1") == "1"
 
     # Corporate networks (Amazon) intercept SSL, so urllib model downloads fail
     # with CERTIFICATE_VERIFY_FAILED. The system bundle has the corp CA.

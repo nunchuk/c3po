@@ -48,6 +48,74 @@ body {
   padding-right: var(--c3po-width);
 }
 
+/* --- Native app (C-3PO.app adds .c3po-native to <html>) ---
+   The window toolbar replaces the in-page button row. The buttons stay in the
+   DOM: the toolbar presses them through panel.js, so WLK keeps owning the
+   recording logic. The power button goes too: quitting the app stops c3po. */
+.c3po-native .buttons-container {
+  display: none;
+}
+
+/* Suggestions sidebar hidden via the toolbar's Suggestions toggle. */
+body.c3po-panel-hidden #c3po-panel {
+  display: none;
+}
+body.c3po-panel-hidden {
+  padding-right: 0;
+}
+
+/* WLK's status line. In the app the window subtitle already shows the state
+   ("Ready", "Recording 00:12"), so routine messages ("Finished processing
+   audio! ...") are hidden. Errors (microphone denied, server gone) must still
+   be seen: panel.js marks them .c3po-status-error and they show as a small red
+   footer. */
+.c3po-native #status {
+  display: none;
+}
+.c3po-native #status.c3po-status-error {
+  display: block;
+  position: fixed;
+  left: 0;
+  right: var(--c3po-width);
+  bottom: 0;
+  margin: 0;
+  padding: 6px 16px;
+  font-size: 12px;
+  text-align: left;
+  color: #ff3b30;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  z-index: 10;
+}
+.c3po-native .c3po-panel-hidden #status {
+  right: 0;
+}
+.c3po-native .transcript-container {
+  padding-bottom: 32px;
+}
+
+/* --- Transcript reading layout ---
+   Newest first, so the latest sentence always sits at the top. WLK appends
+   lines, so reverse them visually. Each line renders as sibling nodes
+   [p (meta), div.textcontent, p (empty)] -- WLK writes <p>...<div>...</div></p>
+   and the parser closes the <p> at the <div> -- so reversing the siblings keeps
+   every sentence together with its translation. panel.js follows the top. */
+#linesTranscript {
+  display: flex;
+  flex-direction: column-reverse;
+}
+/* No diarization, so the speaker number, time range and language chip are
+   noise when reading. The lag indicators (shown only when behind) stay.
+   Silence entries render an empty .textcontent; drop those too. */
+#linesTranscript #speaker,
+#linesTranscript .label_language,
+#linesTranscript .silence,
+#linesTranscript .textcontent:empty,
+#linesTranscript > p > br,
+#linesTranscript > p:empty {
+  display: none;
+}
+
 /* --- Stabilize WLK's transcript area against jitter (unrelated to panel look) ---
    WLK applies `transition: all`, so every size change animates — combined with
    async Chinese filling in, the page slides/jumps. Kill transitions there. */

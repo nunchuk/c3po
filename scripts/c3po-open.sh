@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Open c3po: probe the server, start it if needed, then open the browser.
+# Open c3po in the browser: probe the server, start it if needed, open the page.
 #
-#   bash scripts/c3po-open.sh
+#   bash scripts/c3po-open.sh           # browser mode
+#   bash scripts/c3po-open.sh --serve   # preflight, then run the server in the
+#                                       # foreground (used by C-3PO.app)
 #
-# This is the whole launcher logic. C-3PO.app is only a thin .app wrapper around
-# it (see make-overlay-app.sh), so changing behaviour means editing this file --
-# no need to regenerate the app.
+# C-3PO.app (see make-overlay-app.sh) runs `--serve` as its child process, shows
+# startup progress in its own window and stops the server when it quits. The
+# preflight checks and the arm64 pinning below are shared by both modes.
 #
-# Output is deliberately English-only: the .app runs this without a terminal and
-# pipes it through osascript on failure, where a C locale plus non-ASCII bytes
-# gives "illegal byte sequence".
+# Output is deliberately English-only: it ends up in logs and in the app's error
+# view, and launchd's C locale plus non-ASCII bytes gives "illegal byte sequence".
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,6 +18,8 @@ PORT="${C3PO_PORT:-8989}"
 DISPLAY_HOST="${C3PO_DISPLAY_HOST:-localhost}"
 URL="http://${DISPLAY_HOST}:${PORT}"
 SERVER_LOG="$HOME/.c3po-server.log"
+SERVE=0
+[ "${1:-}" = "--serve" ] && SERVE=1
 
 # The server loads the Whisper model before binding the port; measured at 80s on
 # this machine (not just the first run -- the model is re-loaded every start).
@@ -27,22 +30,18 @@ READY_TIMEOUT=180
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
 
-# Non-blocking macOS notification. Best-effort: never let a missing/denied
-# notification stop the launch.
-notify() {
-  osascript -e "display notification \"$2\" with title \"$1\"" 2>/dev/null || true
-}
+# No macOS notification here on purpose. `osascript -e 'display notification'`
+# is attributed to Script Editor, so clicking the banner launched Script Editor
+# with an empty Untitled document (unified log: usernoted "Connection
+# com.apple.ScriptEditor2 with path: /usr/bin/osascript").
 
 # --noproxy '*' is required: with a proxy configured, curl to localhost returns
 # HTTP 000 and the server looks dead when it is fine.
 probe() { curl -s -m 3 -o /dev/null --noproxy '*' "http://127.0.0.1:${PORT}/"; }
 
-# ---------- 1. already running? ----------
-if probe; then
-  info "c3po already running on ${URL}"
-else
-  # ---------- 2. preflight ----------
-  PY="$REPO/.venv/bin/python"
+PY="$REPO/.venv/bin/python"
+
+preflight() {
   [ -x "$PY" ] || die "No .venv in $REPO. Create it:
   python3 -m venv .venv && source .venv/bin/activate && pip3 install -r requirements.txt"
 
@@ -52,42 +51,56 @@ else
     die "AWS_BEARER_TOKEN_BEDROCK is empty in $REPO/.env (Bedrock API key required)."
   fi
 
-  # WhisperLiveKit shells out to a real ffmpeg binary; without it the recorder
-  # connects and then dies with ffmpeg_not_found and no transcript appears.
-  command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg not found in PATH. Install it: brew install ffmpeg"
+  # Only the MediaRecorder/WebM capture path (C3PO_PCM_INPUT=0) decodes audio
+  # with ffmpeg; without the binary the recorder connects and then dies with
+  # ffmpeg_not_found. The default PCM path does not use it.
+  if [ "${C3PO_PCM_INPUT:-}" = "0" ] || grep -qE '^C3PO_PCM_INPUT=0' "$REPO/.env"; then
+    command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg not found in PATH (needed with C3PO_PCM_INPUT=0). Install it: brew install ffmpeg"
+  fi
 
   # Something on the port that is not answering our probe: bail out rather than
   # start a second server that cannot bind.
   if lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
     die "Port ${PORT} is in use but not answering. Check: lsof -nP -iTCP:${PORT} -sTCP:LISTEN"
   fi
+}
+
+# .venv/bin/python is a universal binary. From a terminal it runs arm64, but a
+# GUI-launched app can inherit an x86_64 preference and then start the very
+# same binary in x86_64 mode -- where the arm64-only wheels (pydantic_core,
+# ctranslate2, ...) die with "incompatible architecture (have 'arm64', need
+# 'x86_64')". So pin the arm64 slice explicitly.
+#
+# Detect the hardware with sysctl, NOT `uname -m`: under Rosetta `uname -m`
+# answers "x86_64", which is false precisely in the case that needs the fix.
+# hw.optional.arm64 reports the real machine either way.
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ] \
+   && command -v arch >/dev/null 2>&1; then
+  run_py=(arch -arm64 "$PY")
+else
+  run_py=("$PY")
+fi
+
+# ---------- app mode: run the server in the foreground ----------
+if [ "$SERVE" = 1 ]; then
+  preflight
+  cd "$REPO" || die "cannot cd to $REPO"
+  # exec keeps the PID, so the app's SIGTERM reaches uvicorn directly and runs
+  # the shutdown handler (which also stops the overlay). The app captures
+  # stdout/stderr into ~/.c3po-server.log.
+  PYTHONPATH="$REPO" exec "${run_py[@]}" -m c3po.server
+fi
+
+# ---------- 1. already running? ----------
+if probe; then
+  info "c3po already running on ${URL}"
+else
+  # ---------- 2. preflight ----------
+  preflight
 
   # ---------- 3. start the server ----------
   info "Starting c3po server (loads the Whisper model, ~80s)..."
-
-  # Tell the user something is happening. The app is LSUIElement, so there is no
-  # Dock icon, no window and no terminal -- an 80s silent wait is indistinguishable
-  # from "the app did not launch". Notifications are non-blocking, unlike a dialog.
-  notify "C-3PO" "Starting up -- the page opens in about 80 seconds."
-
   cd "$REPO" || die "cannot cd to $REPO"
-
-  # .venv/bin/python is a universal binary. From a terminal it runs arm64, but a
-  # GUI-launched app can inherit an x86_64 preference and then start the very
-  # same binary in x86_64 mode -- where the arm64-only wheels (pydantic_core,
-  # ctranslate2, ...) die with "incompatible architecture (have 'arm64', need
-  # 'x86_64')". So pin the arm64 slice explicitly.
-  #
-  # Detect the hardware with sysctl, NOT `uname -m`: under Rosetta `uname -m`
-  # answers "x86_64", which is false precisely in the case that needs the fix.
-  # hw.optional.arm64 reports the real machine either way.
-  if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ] \
-     && command -v arch >/dev/null 2>&1; then
-    run_py=(arch -arm64 "$PY")
-  else
-    run_py=("$PY")
-  fi
-
   PYTHONPATH="$REPO" nohup "${run_py[@]}" -m c3po.server >"$SERVER_LOG" 2>&1 &
   server_pid=$!
 

@@ -582,8 +582,17 @@ class OverlayApp:
             if not line:
                 continue
             english, _, chinese = line.partition("\t")
+            english = english.strip()
             # Tolerate plain single-language lines from an older file format.
-            entries.append((english.strip(), chinese.strip() or english.strip()))
+            chinese = chinese.strip() or english
+            # WLK grows the current line word by word and every version gets its
+            # own translation, so one sentence arrives as several records
+            # ("Today we will" / "Today we will discuss" / ...). Keep only the
+            # newest version instead of stacking near-duplicates.
+            if entries and english.startswith(entries[-1][0]):
+                entries[-1] = (english, chinese)
+            else:
+                entries.append((english, chinese))
         return entries
 
     def _build_attributed(self, entries) -> NSMutableAttributedString:

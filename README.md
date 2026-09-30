@@ -17,6 +17,7 @@ injected on the right.
 - macOS on Apple Silicon (developed on M4 / 16GB)
 - Python 3.10+
 - [Homebrew](https://brew.sh)
+- Xcode Command Line Tools, to build C-3PO.app (`xcode-select --install`)
 - An Amazon Bedrock API key with Claude Haiku 4.5 access
 
 ## Setup
@@ -27,13 +28,12 @@ Meeting audio is captured by routing system sound through a virtual device.
 
 ```bash
 brew install blackhole-2ch
-brew install ffmpeg        # WhisperLiveKit decodes browser audio via ffmpeg
 sudo killall coreaudiod    # makes the new device appear
 ```
 
-> WhisperLiveKit requires a system **ffmpeg** binary (not a pip package). Without
-> it the recorder connects but immediately errors with `ffmpeg_not_found` and no
-> transcription appears.
+> **ffmpeg** is only needed with `C3PO_PCM_INPUT=0` (MediaRecorder/WebM capture,
+> decoded server-side): `brew install ffmpeg`. Without it that mode connects and
+> then errors with `ffmpeg_not_found`. The default PCM capture does not use it.
 
 Then create a **Multi-Output Device** so you can hear the meeting *and* feed it to c3po:
 
@@ -89,27 +89,67 @@ PYTHONPATH=. python3 scripts/verify_bedrock.py
 This starts the server and opens `http://localhost:8989`. The first run downloads
 the Whisper (`small`) and NLLB (600M) models — a few minutes.
 
-### Launcher app (double-click instead of a terminal)
+### C-3PO.app (native window)
 
 ```bash
 bash scripts/make-overlay-app.sh              # installs to ~/Applications
 bash scripts/make-overlay-app.sh /Applications
 ```
 
-Creates **C-3PO.app**: double-click it (or find it in Spotlight) and it probes for
-a running server, starts one if needed, waits until it is ready, and opens the
-page. If anything fails it shows a dialog with the diagnosis — a double-clicked
-app has no terminal, so a silent failure would just look broken.
+Builds **C-3PO.app**, a native macOS window (`macos/C3PO.swift`, compiled with
+`swiftc`). Double-click it or find it in Spotlight: it attaches to a running
+server or starts one (`scripts/c3po-open.sh --serve`), shows a spinner while the
+Whisper model loads (45–80s, on every start), then shows the page in the window.
+If startup fails, the window shows the end of `~/.c3po-server.log` with **Retry**
+and **Open Log**.
 
-**A cold start takes ~80 seconds** (the Whisper model is loaded on every start,
-not just the first). You get a notification when it begins, then the browser opens
-on its own. If the server is already up the page opens immediately.
+The toolbar replaces the page's button row:
+
+| Toolbar | Does |
+|---|---|
+| Record / Stop | Start / stop transcription |
+| Waveform | Live input level while recording — a flat line means no audio is arriving |
+| Save Transcript (also ⌘S) | Save the English transcript as a `.txt` file, e.g. to hand to Claude for meeting notes |
+| Settings (gear) | WLK's settings panel — pick **BlackHole 2ch** as the microphone here once; it is remembered |
+| Subtitles | Show / hide the floating subtitle overlay |
+| Suggestions | Show / hide the reply-suggestion sidebar |
+
+The transcript is **newest first**: the latest sentence always sits right under
+the toolbar. Scroll down to read history; new lines then no longer move the text
+you are reading, and scrolling back to the top resumes following. The state
+(Ready, Recording 00:12, ...) is shown under the window title; WLK's own status
+messages are hidden except errors (e.g. microphone denied, server gone), which
+appear as a small red line at the bottom.
+
+**Saved transcripts** contain every recording session since the server started
+(sessions separated by a blank line), English only, without timestamps — a Stop /
+Record mid-meeting clears the page but not the saved text. The same text is at
+`http://localhost:8989/transcript`, also in browser mode.
+
+**Microphone permission.** The page asks to let C-3PO use the microphone once it
+has loaded — allow it. If you declined, enable C-3PO under System Settings →
+Privacy & Security → Microphone, then View → Reload Page (⌘R); to be asked again
+from scratch, `tccutil reset Microphone com.nunchuk.c3po`. The app is ad-hoc
+signed and macOS ties the grant to the code hash, so rebuilding after a change to
+`macos/C3PO.swift` asks again.
+
+**Press Record with the window visible.** WebKit only starts capture while the
+page is on screen; once recording, the window can sit behind Zoom or be
+minimized. Quitting while recording asks for confirmation first.
+
+Quitting the app (⌘Q, or closing the window) stops the server and the overlay.
+If the app crashes or is force-quit, the server notices within a second and shuts
+itself down (`C3PO_PARENT_PID`). A server that was already running when the app
+started (e.g. from `./run.sh`) is left running on quit.
 
 It also creates **C-3PO Quit.app** for stopping everything — see "Stopping c3po".
 
-The apps are thin wrappers around `scripts/c3po-open.sh` and
-`scripts/c3po-quit.sh`; edit those to change behaviour, no rebuild needed. Logs:
-`~/.c3po-launch.log`, `~/.c3po-quit.log`, `~/.c3po-server.log`.
+Changing `macos/C3PO.swift` needs a rebuild; startup checks and server behaviour
+live in `scripts/c3po-open.sh`, which does not. Logs: `~/.c3po-server.log`,
+`~/.c3po-quit.log`.
+
+**Browser mode** still works: `bash scripts/c3po-open.sh` starts the server in the
+background and opens the page in your default browser.
 
 The icon is generated from `assets/c3po.svg` by `scripts/make-icon.py` (AppKit +
 `sips` + `iconutil`, all built into macOS — no `rsvg-convert`/`inkscape` needed).
@@ -117,9 +157,10 @@ The icon is generated from `assets/c3po.svg` by `scripts/make-icon.py` (AppKit +
 
 Uninstall: `rm -rf ~/Applications/C-3PO.app`
 
-In the page:
-- Press the record button and start the meeting. Transcription + Chinese
-  translation appear on the left (WhisperLiveKit's UI).
+In the window (or the browser page):
+- Press Record (the toolbar in the app, the round button in a browser) and start
+  the meeting. Transcription + Chinese translation appear on the left
+  (WhisperLiveKit's UI).
 - Fill in **pre-meeting context** (topic, project background, your role, key terms)
   in the right panel and click **Save context**.
 - Reply suggestions refresh automatically as the conversation moves. Click a card
@@ -131,28 +172,30 @@ In the page:
 server keeps running (~41 MB), holds port 8989, and keeps the subtitle-overlay
 child process alive.
 
-Three ways to quit, all ending in the same clean shutdown:
+Ways to quit, all ending in the same clean shutdown:
 
-- **The power button in the page**, next to the subtitle toggle (asks for
-  confirmation first — quitting mid-meeting means waiting ~80s to get back).
+- **Quit C-3PO.app** (⌘Q, or close its window).
+- **The power button in the page** (browser mode; the app hides it because quitting
+  the app does the same), next to the subtitle toggle. It asks for confirmation
+  first — quitting mid-meeting means waiting ~80s to get back.
 - **C-3PO Quit.app** — double-click, no terminal needed.
 - ```bash
   bash scripts/c3po-quit.sh
   ```
 
-All three send `SIGTERM` so the server runs its shutdown handler (stop the
+All of them send `SIGTERM` so the server runs its shutdown handler (stop the
 suggester, terminate the overlay child, clear the overlay flag). The script waits
 for a clean exit and only escalates to `SIGKILL` if that stalls. Shutdown takes
-7–15s.
+about a second (measured with the app's page still connected).
 
 The page's button posts to `/shutdown`, which signals the process rather than
 exiting from the request handler — exiting inline would skip the handler and leave
 the always-on-top overlay orphaned. The response is sent before the signal, so the
 page can report success instead of seeing a dropped connection.
 
-Avoid `kill -9` / `pkill -9` yourself: the handler never runs, and the overlay is
-an always-on-top window that then cannot be closed from the UI. If that does
-happen, `scripts/c3po-quit.sh` sweeps up the orphan.
+Avoid `kill -9` / `pkill -9` on the server yourself: the handler never runs. The
+overlay notices its parent is gone and exits on its own, and
+`scripts/c3po-quit.sh` sweeps up anything left over.
 
 ## Configuration
 
@@ -179,6 +222,7 @@ variables (loaded from `.env`). Common ones:
 | `C3PO_PORT` | `8989` | Server port |
 | `C3PO_HOST` | `127.0.0.1` | Bind address (numeric on purpose — `localhost` can make uvicorn bind IPv6 only) |
 | `C3PO_DISPLAY_HOST` | `localhost` | Hostname shown in the URL and opened in the browser |
+| `C3PO_PCM_INPUT` | `1` | Stream raw PCM from an AudioWorklet. `0` = MediaRecorder/WebM (needs ffmpeg; in the app's WebKit it arrives in ~1s chunks, adding subtitle lag) |
 
 ## Notes
 
@@ -198,7 +242,8 @@ variables (loaded from `.env`). Common ones:
 - `scripts/verify_bedrock.py` — checks Bedrock connectivity and the model id.
 - `scripts/verify_translation.py` — checks the local NLLB EN→ZH translation path.
 - `scripts/feed_asr.py` — feeds a WebM file straight to `/asr` (no browser), handy
-  for debugging the transcription/translation pipeline.
+  for debugging the transcription/translation pipeline. Run the server with
+  `C3PO_PCM_INPUT=0` for it: the default PCM mode does not decode WebM.
 
 ## Debugging "no subtitles appear"
 
@@ -209,7 +254,7 @@ tools exist to tell them apart; work down the list to find where audio stops.
 |---|---|
 | `scripts/feed_asr.py <file.webm> ws://localhost:8989/asr` | Is the **server** pipeline healthy? It bypasses the browser entirely. Transcript + Chinese here means the fault is browser-side. |
 | `/mictest` page | Can the **browser** capture from a given device? Shows the live level and the track the browser actually handed over. Pick BlackHole 2ch and watch the peak. |
-| `C3PO_DUMP_AUDIO=/tmp/dump.webm` | What exactly did the browser **send**? Inspect it offline: `ffmpeg -i /tmp/dump.webm -af volumedetect -f null -`. A `mean_volume` near -90 dB means silence was streamed. |
+| `C3PO_DUMP_AUDIO=/tmp/dump.pcm` | What exactly did the page **send**? By default that is raw 16 kHz mono s16le: `ffmpeg -f s16le -ar 16000 -ac 1 -i /tmp/dump.pcm -af volumedetect -f null -` (WebM with `C3PO_PCM_INPUT=0`: `ffmpeg -i /tmp/dump.webm ...`). A `mean_volume` near -90 dB means silence was streamed. |
 | `/clientlog` (POST `{"msg": "..."}`) | Page-side diagnostics in the server log — the browser console is not readable from a terminal, and Chrome disables JavaScript-via-AppleScript by default. |
 
 Useful server-log signals: `n_tokens_produced: 0` with a healthy

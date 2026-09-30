@@ -54,17 +54,39 @@ class SuggestionState:
     # until the fallback timer elapses).
     content_event: asyncio.Event = field(default_factory=asyncio.Event)
 
-    def add_line(self, text: str, speaker: int = -1) -> None:
-        """Append a finalized line and update question/refresh signals."""
+    def add_line(self, text: str, speaker: int = -1) -> _Line | None:
+        """Append a new transcript line and update question/refresh signals.
+
+        Returns the buffered line so the caller can refresh it as WLK grows it
+        (see update_line), or None for an empty line.
+        """
         text = text.strip()
         if not text:
-            return
-        self.lines.append(_Line(text=text, speaker=speaker))
+            return None
+        line = _Line(text=text, speaker=speaker)
+        self.lines.append(line)
         self.revision += 1
         self.new_lines_since_gen += 1
         if self._looks_like_question(text):
             self.pending_question = text
         # Wake the worker so it can evaluate the new-lines / question triggers.
+        self.content_event.set()
+        return line
+
+    def update_line(self, line: _Line, text: str) -> None:
+        """Refresh a buffered line that WLK has grown or re-segmented.
+
+        New content (revision, question check) but not a new line, so it feeds
+        the fallback timer and question detection without inflating the
+        new-lines trigger.
+        """
+        text = text.strip()
+        if not text or text == line.text:
+            return
+        line.text = text
+        self.revision += 1
+        if self._looks_like_question(text):
+            self.pending_question = text
         self.content_event.set()
 
     def _looks_like_question(self, text: str) -> bool:

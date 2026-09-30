@@ -13,11 +13,10 @@
 set -uo pipefail
 
 PORT="${C3PO_PORT:-8989}"
-# Seconds to wait for a clean shutdown before escalating to SIGKILL. Measured at
-# 15s with the subtitle overlay running: the server's shutdown handler stops the
-# suggester, then terminates the overlay child and waits up to 5s for it. 10s was
-# too short and escalated every time -- which defeats the point, since SIGKILL
-# skips the handler and can orphan the overlay window.
+# Seconds to wait for a clean shutdown before escalating to SIGKILL. A clean
+# shutdown now takes ~1s. It used to take 15s or hang outright while a page was
+# connected (a /suggestions handler blocked uvicorn's graceful shutdown), which
+# is why this is generous: SIGKILL skips the shutdown handler.
 GRACE=30
 # Keep in sync with config.overlay_visible_flag in c3po/config.py.
 FLAG="$HOME/Library/Application Support/meeting-translator/overlay-visible"
@@ -50,9 +49,9 @@ for pid in $pids; do
     fi
     sleep 1
     waited=$((waited + 1))
-    # Shutdown legitimately takes ~15s, which is long enough that silence looks
-    # like a hang.
-    [ "$waited" -eq 5 ] && info "  still shutting down (this takes ~15s)..."
+    # Past 5s something is holding the shutdown up; say so rather than sit
+    # silent until the SIGKILL.
+    [ "$waited" -eq 5 ] && info "  still shutting down..."
   done
   if ! kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$GRACE" ]; then
     info "  exited cleanly after ${waited}s."

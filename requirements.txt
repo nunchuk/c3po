@@ -7,6 +7,8 @@ whisperlivekit==0.2.19
 mlx-whisper==0.4.3
 nllw==0.1.6
 anthropic==0.109.2
+# Subtitle translation calls the Bedrock Converse API (c3po/translator.py).
+boto3==1.43.32
 fastapi==0.137.1
 uvicorn==0.49.0
 websockets==16.0

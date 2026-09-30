@@ -198,6 +198,119 @@
     });
   }
 
+  // Bridge to C-3PO.app, the native window. Its toolbar replaces the in-page
+  // button row (hidden by panel.css), so it needs the buttons' state and a way
+  // to press them. Pressing the existing buttons keeps WLK's and our own click
+  // handlers the only code path. No-op in a browser: no "c3po" message handler.
+  function connectNativeShell() {
+    const handlers = window.webkit && window.webkit.messageHandlers;
+    if (!handlers || !handlers.c3po) return;
+    const rec = document.getElementById("recordButton");
+    const gear = document.getElementById("settingsToggle");
+    const overlay = document.getElementById("c3po-overlay-toggle");
+    const timer = rec && rec.querySelector(".timer");
+    if (!rec || !gear || !overlay || !timer) {
+      setTimeout(connectNativeShell, 300);
+      return;
+    }
+
+    // Waveform for the toolbar; WLK draws its own into the hidden record button.
+    // `analyser` is WLK's top-level binding (live_transcription.js), visible to
+    // this script, and null until recording starts. Each point is the extreme
+    // sample of its slice, so speech reads as a waveform rather than noise.
+    const WAVE_POINTS = 48;
+    // Speech through BlackHole is quiet in time-domain terms: measured frame
+    // peaks of ~0.10 of full scale for typical speech (p90), 0.39 at the loudest,
+    // which drew a nearly flat line. Boost it, and soft-clip with tanh so loud
+    // passages round off instead of flat-topping (0.10 -> 0.38, 0.39 -> 0.92).
+    const WAVE_GAIN = 4;
+    let waveTimer = null;
+    const postWave = () => {
+      if (typeof analyser === "undefined" || !analyser) return;
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteTimeDomainData(data);
+      const step = data.length / WAVE_POINTS;
+      const wave = [];
+      for (let i = 0; i < WAVE_POINTS; i++) {
+        let peak = 0;
+        for (let j = Math.floor(i * step); j < Math.floor((i + 1) * step); j++) {
+          const v = data[j] / 128 - 1;
+          if (Math.abs(v) > Math.abs(peak)) peak = v;
+        }
+        wave.push(Math.tanh(peak * WAVE_GAIN));
+      }
+      handlers.c3po.postMessage({ wave });
+    };
+
+    // Record/Stop was pressed and WLK has not flipped state yet (it does so only
+    // once the socket and microphone are up). Guards against a double start.
+    let pending = false;
+    let wasRecording = rec.classList.contains("recording");
+    const post = () => {
+      const recording = rec.classList.contains("recording");
+      if (recording !== wasRecording) {
+        wasRecording = recording;
+        pending = false;
+      }
+      if (recording && !waveTimer) {
+        waveTimer = setInterval(postWave, 50);
+      } else if (!recording && waveTimer) {
+        clearInterval(waveTimer);
+        waveTimer = null;
+      }
+      handlers.c3po.postMessage({
+        recording,
+        pending,
+        busy: rec.disabled,  // WLK disables it while the final audio drains
+        timer: timer.textContent,
+        settings: gear.classList.contains("active"),
+        overlay: overlay.classList.contains("active"),
+        panel: !document.body.classList.contains("c3po-panel-hidden"),
+      });
+    };
+    const observer = new MutationObserver(post);
+    for (const el of [rec, gear, overlay, document.body]) {
+      observer.observe(el, { attributes: true, attributeFilter: ["class", "disabled"] });
+    }
+    observer.observe(timer, { childList: true, characterData: true, subtree: true });
+
+    // Keep WLK's error messages visible: panel.css hides the status line in the
+    // app, since the window subtitle shows the state. Every WLK error message
+    // contains one of these words, and none of its routine ones do.
+    const status = document.getElementById("status");
+    if (status) {
+      const markError = () => status.classList.toggle(
+        "c3po-status-error", /error|invalid|disconnected|could not/i.test(status.textContent));
+      new MutationObserver(markError).observe(
+        status, { childList: true, characterData: true, subtree: true });
+      markError();
+    }
+
+    window.c3poNative = {
+      // Idempotent, so a toolbar acting on stale state (e.g. right after a page
+      // reload) cannot start a recording by pressing "Stop".
+      setRecording: (on) => {
+        if (on === rec.classList.contains("recording")) return;
+        if (pending || rec.disabled) return;
+        pending = true;
+        post();
+        rec.click();
+        // Starting can fail without the state ever flipping (e.g. microphone
+        // denied); do not leave the toolbar disabled for good.
+        setTimeout(() => {
+          if (pending) {
+            pending = false;
+            post();
+          }
+        }, 5000);
+      },
+      toggleSettings: () => gear.click(),
+      toggleOverlay: () => overlay.click(),
+      togglePanel: () => document.body.classList.toggle("c3po-panel-hidden"),
+    };
+    post();
+  }
+
   function wireEvents() {
     document.getElementById("c3po-save").addEventListener("click", saveContext);
     document
@@ -220,10 +333,12 @@
   // reads as stepping rather than gliding.
   //
   // Instead we run ONE continuous rAF loop that eases the scroll position toward
-  // the bottom every frame. New content just moves the target; the animation in
-  // flight is never restarted, so motion stays fluid at any update rate.
-  // Following pauses when the user scrolls up to read history and resumes when
-  // they come back near the bottom.
+  // the TOP every frame -- the transcript is newest-first (panel.css reverses
+  // it). The animation in flight is never restarted, so motion stays fluid at
+  // any update rate. Following pauses when the user scrolls down to read
+  // history and resumes when they come back near the top. While paused, new
+  // lines still land above what they are reading, so the loop shifts the
+  // scroll position by the growth and the text under their eyes stays put.
   function tameScrolling() {
     const container = document.querySelector(".transcript-container");
     const lines = document.getElementById("linesTranscript");
@@ -232,7 +347,7 @@
       return;
     }
 
-    const NEAR_BOTTOM_PX = 120;
+    const NEAR_TOP_PX = 120;
     // Fraction of the remaining distance covered per frame. Higher = snappier,
     // lower = more languid. 0.18 keeps up with speech without visible lag.
     const EASE = 0.18;
@@ -242,31 +357,35 @@
 
     let following = true;
     let selfScrolling = false;
+    let lastHeight = container.scrollHeight;
 
     container.addEventListener(
       "scroll",
       () => {
         if (selfScrolling) return;  // ignore our own animation
-        const distanceFromBottom =
-          container.scrollHeight - container.scrollTop - container.clientHeight;
-        following = distanceFromBottom <= NEAR_BOTTOM_PX;
+        following = container.scrollTop <= NEAR_TOP_PX;
       },
       { passive: true }
     );
 
     function frame() {
+      const grown = container.scrollHeight - lastHeight;
+      lastHeight = container.scrollHeight;
       if (following) {
-        const target = container.scrollHeight - container.clientHeight;
-        const delta = target - container.scrollTop;
+        const delta = -container.scrollTop;  // target is scrollTop 0
         if (Math.abs(delta) > SNAP_PX) {
           selfScrolling = true;
           container.scrollTop += delta * EASE;
           selfScrolling = false;
         } else if (delta !== 0) {
           selfScrolling = true;
-          container.scrollTop = target;
+          container.scrollTop = 0;
           selfScrolling = false;
         }
+      } else if (grown !== 0) {
+        selfScrolling = true;
+        container.scrollTop += grown;
+        selfScrolling = false;
       }
       requestAnimationFrame(frame);
     }
@@ -307,6 +426,7 @@
     buildPanel();
     addOverlayButton();
     addPowerButton();
+    connectNativeShell();
     wireEvents();
     connectSuggestions();
     tameScrolling();

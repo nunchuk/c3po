@@ -31,7 +31,7 @@ if config.ssl_cert_file and os.path.exists(config.ssl_cert_file):
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import HTMLResponse  # noqa: E402
+from fastapi.responses import HTMLResponse, PlainTextResponse  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from whisperlivekit import (  # noqa: E402
@@ -115,6 +115,21 @@ def _start_overlay() -> subprocess.Popen | None:
         return None
 
 
+async def _exit_with_parent(parent_pid: int) -> None:
+    """Shut down once the app that started the server is gone.
+
+    C-3PO.app stops the server on a normal quit; this covers a crash or force
+    quit. Compares getppid() instead of probing the PID: an orphan is
+    re-parented to launchd, so a changed parent is unambiguous even if the PID
+    is reused. Sends SIGTERM rather than exiting, so the lifespan shutdown still
+    runs and terminates the overlay (same path as /shutdown).
+    """
+    while os.getppid() == parent_pid:
+        await asyncio.sleep(1.0)
+    logger.info("Parent app (pid=%s) is gone; shutting down", parent_pid)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Build the shared transcription engine and start the suggestion loop."""
@@ -129,6 +144,7 @@ async def lifespan(app: FastAPI):
         backend=config.backend,
         diarization=config.diarization,
         buffer_trimming_sec=config.buffer_trimming_sec,
+        pcm_input=config.pcm_input,
         host=config.host,
         port=config.port,
     )
@@ -139,11 +155,18 @@ async def lifespan(app: FastAPI):
     translator = Translator()
     if config.overlay_enabled:
         overlay_process = _start_overlay()
-    logger.info("c3po ready: whisper=%s translate=%s backend=%s",
-                config.whisper_model, config.translate_model_id, config.backend)
+    watchdog = (
+        asyncio.create_task(_exit_with_parent(config.parent_pid))
+        if config.parent_pid else None
+    )
+    logger.info("c3po ready: whisper=%s translate=%s backend=%s pcm_input=%s",
+                config.whisper_model, config.translate_model_id, config.backend,
+                config.pcm_input)
     try:
         yield
     finally:
+        if watchdog is not None:
+            watchdog.cancel()
         if suggester is not None:
             await suggester.stop()
         if overlay_process is not None and overlay_process.poll() is None:
@@ -199,6 +222,15 @@ def _render_index() -> str:
         ": { audio: true };",
         ": { audio: { echoCancellation: false, noiseSuppression: false,"
         " autoGainControl: false } };",
+    )
+
+    # BlackHole delivers stereo. WLK's PCM worklet forwards channel 0 only,
+    # whereas the ffmpeg path mixed both channels down; make the node downmix
+    # (L+R)/2 itself so audio panned to one side is not dropped.
+    html = html.replace(
+        "{ numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1 }",
+        '{ numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1,'
+        ' channelCountMode: "explicit", channelInterpretation: "speakers" }',
     )
 
     panel_css = (_PANEL_DIR / "panel.css").read_text(encoding="utf-8")
@@ -324,36 +356,98 @@ async def suggestions_ws(websocket: WebSocket) -> None:
     assert suggester is not None
     await websocket.accept()
     queue = suggester.subscribe()
-    try:
+
+    async def forward() -> None:
         while True:
-            payload = await queue.get()
-            await websocket.send_json(payload)
+            await websocket.send_json(await queue.get())
+
+    # Watch for the disconnect instead of only waiting on the queue. A handler
+    # parked on queue.get() never notices its page went away, and uvicorn's
+    # graceful shutdown waits for every handler: the server then hung at
+    # "Waiting for background tasks to complete" until SIGKILL, skipping the
+    # lifespan shutdown. The page never sends here, so receive() just blocks
+    # until the socket closes.
+    sender = asyncio.create_task(forward())
+    try:
+        await websocket.receive_text()
     except WebSocketDisconnect:
         pass
     finally:
+        sender.cancel()
+        # Collect its outcome (a failed send on a closed socket is expected) so
+        # asyncio does not log "Task exception was never retrieved".
+        await asyncio.gather(sender, return_exceptions=True)
         suggester.unsubscribe(queue)
+
+
+# --- Meeting transcript (Save Transcript in C-3PO.app) ---
+
+
+class TranscriptLog:
+    """The meeting's English transcript, served as plain text by /transcript.
+
+    WLK resends every line on each update and grows the current line in place,
+    so each recording session keeps the latest full version instead of
+    appending lines as they first appear. Sessions since the server started
+    stay in order: a Stop/Record mid-meeting clears the page, not the export.
+    """
+
+    def __init__(self) -> None:
+        self._sessions: list[list[str]] = []
+
+    def new_session(self) -> list[str]:
+        session: list[str] = []
+        self._sessions.append(session)
+        return session
+
+    @staticmethod
+    def update(session: list[str], payload: dict) -> None:
+        texts = [(line.get("text") or "").strip() for line in payload.get("lines") or []]
+        # Words heard but not yet committed to a line; WLK flushes them at stop.
+        texts.append((payload.get("buffer_transcription") or "").strip())
+        session[:] = [t for t in texts if t]
+
+    def text(self) -> str:
+        return "\n\n".join("\n".join(s) for s in self._sessions if s)
+
+
+transcript_log = TranscriptLog()
+
+
+@app.get("/transcript")
+async def get_transcript() -> PlainTextResponse:
+    """English only, one line per transcript line, sessions separated by a blank line."""
+    return PlainTextResponse(transcript_log.text())
 
 
 # --- ASR WebSocket (browser mic -> WLK; also feeds the rolling buffer) ---
 
 
-def _ingest_front_data(payload: dict) -> None:
-    """Extract finalized lines from a WLK FrontData dict into the buffer.
+def _ingest_front_data(payload: dict, tracked: list) -> None:
+    """Keep the suggester's buffer in step with WLK's transcript lines.
 
-    Only newly-finalized lines are appended (dedup by count) so the suggester
-    sees each line once. `lines` holds finalized segments; `buffer_transcription`
-    is the still-changing tail and is intentionally ignored here.
+    WLK resends the full `lines` list on every update and grows the newest line
+    in place ("Today we will" -> "Today we will discuss the timeline."). A line
+    seen for the first time is appended; one already buffered is refreshed when
+    its text changes, so suggestions see whole sentences rather than the first
+    fragment of each. `buffer_transcription` (the uncommitted tail) is ignored.
+
+    `tracked` belongs to one recording session and maps each line index to its
+    buffer entry (None while the line has no words yet). It must not be shared:
+    WLK numbers lines from zero again after Stop / Record, which made a shared
+    counter skip the start of every later session.
     """
     assert suggester is not None
-    lines = payload.get("lines") or []
     state = suggester.state
-    # WLK resends the full `lines` list each update; append only the unseen tail.
-    seen = getattr(state, "_ingested_line_count", 0)
-    for line in lines[seen:]:
+    for index, line in enumerate(payload.get("lines") or []):
         text = (line.get("text") or "").strip()
-        if text:
-            state.add_line(text, speaker=line.get("speaker", -1))
-    state._ingested_line_count = len(lines)  # type: ignore[attr-defined]
+        if index == len(tracked):
+            tracked.append(None)
+        entry = tracked[index]
+        if entry is not None:
+            state.update_line(entry, text)
+        elif text:
+            tracked[index] = state.add_line(text, speaker=line.get("speaker", -1))
 
 
 def _inject_translations(payload: dict) -> None:
@@ -378,12 +472,15 @@ def _inject_translations(payload: dict) -> None:
             asyncio.create_task(translator.ensure(text))
 
 
-async def _handle_results(websocket: WebSocket, results_generator) -> None:
+async def _handle_results(websocket: WebSocket, results_generator,
+                          session: list[str]) -> None:
     """Forward WLK results to the browser AND tap them into the buffer."""
+    tracked: list = []  # this session's lines in the suggester buffer
     try:
         async for response in results_generator:
             payload = response.to_dict()
-            _ingest_front_data(payload)
+            transcript_log.update(session, payload)
+            _ingest_front_data(payload, tracked)
             _inject_translations(payload)
             await websocket.send_json(payload)
         await websocket.send_json({"type": "ready_to_stop"})
@@ -412,7 +509,9 @@ async def asr_ws(websocket: WebSocket) -> None:
         logger.warning("Failed to send config to ASR client", exc_info=True)
 
     results_generator = await audio_processor.create_tasks()
-    results_task = asyncio.create_task(_handle_results(websocket, results_generator))
+    results_task = asyncio.create_task(
+        _handle_results(websocket, results_generator, transcript_log.new_session())
+    )
 
     # Debug aid: set C3PO_DUMP_AUDIO=/path/to/dump.webm to save exactly what the
     # browser sends, so a silent/undecodable stream can be inspected offline.
@@ -460,6 +559,9 @@ def main() -> None:
         port=config.port,
         lifespan="on",
         log_level="info",
+        # Backstop for any handler that still blocks shutdown: cancel it after
+        # 5s so the lifespan shutdown (suggester, overlay) always runs.
+        timeout_graceful_shutdown=5,
     )
 
 
