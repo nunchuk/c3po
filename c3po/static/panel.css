@@ -142,8 +142,23 @@ body.c3po-panel-hidden {
   color: var(--text);
 }
 
-/* --- Context editor --- */
-#c3po-context {
+/* --- Context editor: About me + Meeting background --- */
+#c3po-context-editor label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin: 12px 0 6px;
+}
+#c3po-context-editor label:first-child {
+  margin-top: 0;
+}
+.c3po-note {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: 6px;
+}
+#c3po-context-editor textarea {
   width: 100%;
   box-sizing: border-box;
   min-height: 64px;
@@ -152,10 +167,14 @@ body.c3po-panel-hidden {
   border: 1px solid var(--border);
   padding: 10px 12px;
   font: inherit;
+  font-size: 14px;
   background: var(--button-bg);
   color: var(--text);
 }
-#c3po-context:focus {
+#c3po-context-editor textarea.tall {
+  min-height: 140px;
+}
+#c3po-context-editor textarea:focus {
   outline: none;
   border-color: var(--c3po-accent);
   box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.15);
@@ -165,6 +184,36 @@ body.c3po-panel-hidden {
   display: flex;
   gap: 8px;
   margin: 10px 0 18px;
+}
+
+/* The editor folded into one line once saved. */
+#c3po-context-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+/* The rules above set display, which would otherwise beat the hidden attribute. */
+#c3po-context-summary[hidden],
+#c3po-context-editor[hidden],
+.c3po-card[hidden] {
+  display: none;
+}
+
+.c3po-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 13px;
+  color: var(--c3po-accent);
+  cursor: pointer;
 }
 
 /* Small pill buttons matching WLK's white+border style. Compact (not full
@@ -187,10 +236,15 @@ body.c3po-panel-hidden {
   transform: scale(0.96);
 }
 
+#c3po-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
 #c3po-status {
   font-size: 13px;
   color: var(--muted);
-  margin-bottom: 12px;
 }
 
 #c3po-question-flag {
@@ -207,7 +261,7 @@ body.c3po-panel-hidden {
   display: block;
 }
 
-/* --- Suggestion cards (uniform style for short and full-answer alike) --- */
+/* --- Reply cards: quick reply and full answer, each with its Chinese --- */
 .c3po-card {
   border-radius: 16px;
   border: 1px solid var(--border);
@@ -222,7 +276,6 @@ body.c3po-panel-hidden {
   background: rgba(0, 113, 227, 0.08);
 }
 
-/* Card title: English angle + Chinese hint together, e.g. "BUY TIME · 争取时间". */
 .c3po-card .angle {
   font-size: 11px;
   text-transform: uppercase;
@@ -234,6 +287,19 @@ body.c3po-panel-hidden {
   font-size: 15px;
   line-height: 1.5;
   color: var(--text);
+}
+/* The Chinese translation: enough to judge the reply at a glance. */
+.c3po-card .zh {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.c3po-card .zh:empty {
+  display: none;
+}
+.c3po-card.streaming .angle::after {
+  content: " …";
 }
 .c3po-card.copied {
   background: rgba(52, 199, 89, 0.18);

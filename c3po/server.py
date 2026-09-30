@@ -274,13 +274,21 @@ async def mictest() -> HTMLResponse:
 
 
 class ContextBody(BaseModel):
-    context: str = ""
+    me: str = ""
+    meeting: str = ""
+
+
+@app.get("/context")
+async def get_context() -> dict:
+    """The saved About me / Meeting background, so the panel can refill them."""
+    assert suggester is not None
+    return {"me": suggester.state.me, "meeting": suggester.state.meeting}
 
 
 @app.post("/context")
 async def set_context(body: ContextBody) -> dict:
     assert suggester is not None
-    suggester.set_context(body.context)
+    suggester.set_context(body.me, body.meeting)
     return {"ok": True}
 
 

@@ -14,15 +14,46 @@ Refresh strategy (balanced defaults, all tunable in config):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field
 
 from c3po.config import config
 from c3po.llm import SuggestionClient
+from c3po.prompts import split_reply
 
 logger = logging.getLogger(__name__)
+
+
+def _load_context() -> tuple[str, str]:
+    """Return the persisted (about_me, meeting_background), or empty strings."""
+    try:
+        with open(config.context_file, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return str(data.get("me", "")), str(data.get("meeting", ""))
+    except FileNotFoundError:
+        return "", ""
+    except (OSError, ValueError):
+        logger.warning("Could not read %s", config.context_file, exc_info=True)
+        return "", ""
+
+
+def _save_context(me: str, meeting: str) -> None:
+    """Persist both fields atomically, so a crash never leaves half a file."""
+    folder = os.path.dirname(config.context_file)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=folder, delete=False, suffix=".tmp"
+        ) as fh:
+            json.dump({"me": me, "meeting": meeting}, fh, ensure_ascii=False, indent=2)
+        os.replace(fh.name, config.context_file)
+    except OSError:
+        logger.warning("Could not save %s", config.context_file, exc_info=True)
 
 
 @dataclass
@@ -37,7 +68,10 @@ class _Line:
 class SuggestionState:
     """Shared state between the /asr ingestion path and the background task."""
 
-    context: str = ""
+    # "About me" (kept across meetings) and "Meeting background" (pasted per
+    # meeting), both persisted to config.context_file.
+    me: str = ""
+    meeting: str = ""
     lines: deque[_Line] = field(
         default_factory=lambda: deque(maxlen=config.buffer_max_lines)
     )
@@ -115,6 +149,7 @@ class Suggester:
 
     def __init__(self) -> None:
         self.state = SuggestionState()
+        self.state.me, self.state.meeting = _load_context()
         self._client = SuggestionClient()
         self._task: asyncio.Task | None = None
         self._force_event = asyncio.Event()
@@ -138,8 +173,9 @@ class Suggester:
 
     # --- public API used by the server ---
 
-    def set_context(self, context: str) -> None:
-        self.state.context = context
+    def set_context(self, me: str, meeting: str) -> None:
+        self.state.me, self.state.meeting = me, meeting
+        _save_context(me, meeting)
         self.force_refresh()
 
     def force_refresh(self) -> None:
@@ -181,10 +217,23 @@ class Suggester:
             except asyncio.CancelledError:
                 raise
 
-            # Debounce: never call Bedrock more often than debounce_seconds.
-            elapsed = time.monotonic() - last_gen_time
-            if elapsed < config.debounce_seconds:
-                await asyncio.sleep(config.debounce_seconds - elapsed)
+            # Debounce: never call Bedrock more often than debounce_seconds --
+            # except for a finished question ("...?"), the moment the user may
+            # have to answer. A marker alone ("can you") still waits, or every
+            # word of a question still being spoken would fire a call.
+            # The wait wakes on new content: a question usually arrives as a
+            # fragment ("Nunchuk, can you") that starts this wait, and completes
+            # with its "?" while we are still in it.
+            while True:
+                urgent = (self.state.pending_question or "").rstrip().endswith("?")
+                remaining = config.debounce_seconds - (time.monotonic() - last_gen_time)
+                if urgent or remaining <= 0:
+                    break
+                self.state.content_event.clear()
+                try:
+                    await asyncio.wait_for(self.state.content_event.wait(), remaining)
+                except asyncio.TimeoutError:
+                    break
 
             if self.state.revision == self.state.last_generated_revision:
                 # Nothing new since last generation (e.g. only a forced event with
@@ -193,6 +242,10 @@ class Suggester:
                     continue
 
             self._force_event.clear()
+            if not self.state.lines:
+                # Nobody has spoken yet (e.g. context saved before the meeting):
+                # a reply to nothing is just generic filler.
+                continue
             await self._generate()
             last_gen_time = time.monotonic()
 
@@ -244,29 +297,18 @@ class Suggester:
         return bool(done)
 
     async def _generate(self) -> None:
-        """Generate suggestions off the event loop and broadcast incrementally.
+        """Stream a quick reply and a full answer concurrently into the panel.
 
-        The short replies and the full answer are fired as two concurrent Bedrock
-        calls. The short replies are the time-critical path (what the user reaches
-        for when suddenly called on), so they are awaited and broadcast first; the
-        longer full-answer card merges in when its slower call returns. Each call's
-        SDK invocation is blocking, so both run in worker threads.
+        Two Bedrock calls run side by side in worker threads (the SDK stream is
+        blocking). Every chunk is handed back to the event loop and broadcast, so
+        the quick reply's first words appear in about a second while the full
+        answer is still being written. A card keeps its previous text until its
+        new text starts arriving, so it never flashes empty.
         """
         revision = self.state.revision
         last_question = self.state.pending_question
-        context = self.state.context
+        me, meeting = self.state.me, self.state.meeting
         earlier, immediate = self.state.recent_transcript()
-
-        short_task = asyncio.create_task(
-            asyncio.to_thread(
-                self._client.suggest, context, earlier, immediate, last_question, "short"
-            )
-        )
-        long_task = asyncio.create_task(
-            asyncio.to_thread(
-                self._client.suggest, context, earlier, immediate, last_question, "long"
-            )
-        )
 
         # Record bookkeeping up front so refresh triggers reset for this cycle.
         self.state.last_generated_revision = revision
@@ -275,21 +317,29 @@ class Suggester:
         if last_question is not None and self.state.pending_question == last_question:
             self.state.pending_question = None
 
-        # Short replies first — render them the moment they arrive.
-        short = await short_task
-        if short:
-            self.state.latest_suggestions = [
-                s for s in short if s.get("kind") != "long"
-            ]
-        self._broadcast()
+        loop = asyncio.get_running_loop()
 
-        # Full answer merges in when ready, replacing any prior long card and
-        # keeping the short cards in place.
-        long = await long_task
-        if long:
-            long_items = [s for s in long if s.get("kind") == "long"] or long
-            shorts = [
-                s for s in self.state.latest_suggestions if s.get("kind") != "long"
-            ]
-            self.state.latest_suggestions = shorts + long_items
-            self._broadcast()
+        def stream(kind: str) -> str:
+            def on_text(text: str) -> None:
+                loop.call_soon_threadsafe(self._update_card, kind, text, False)
+
+            return self._client.stream_reply(
+                kind, me, meeting, earlier, immediate, last_question, on_text
+            )
+
+        async def run(kind: str) -> None:
+            text = await asyncio.to_thread(stream, kind)
+            if text:
+                self._update_card(kind, text, True)
+
+        await asyncio.gather(run("quick"), run("full"))
+
+    def _update_card(self, kind: str, text: str, done: bool) -> None:
+        """Replace one card with the reply streamed so far and broadcast it."""
+        english, chinese = split_reply(text)
+        if not english:
+            return
+        cards = {card["kind"]: card for card in self.state.latest_suggestions}
+        cards[kind] = {"kind": kind, "text": english, "zh": chinese, "done": done}
+        self.state.latest_suggestions = [cards[k] for k in ("quick", "full") if k in cards]
+        self._broadcast()

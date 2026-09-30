@@ -1,26 +1,59 @@
 // c3po reply-suggestion panel, injected into the WhisperLiveKit page.
-// Builds a fixed right-side panel: pre-meeting context editor + always-on
-// reply suggestions streamed over a WebSocket, with question highlighting and
-// a manual-refresh hotkey. The transcription UI stays WLK's own.
+// Builds a fixed right-side panel: an "About me" + "Meeting background" editor
+// (saved server-side, collapsed once saved) and two reply cards -- a quick
+// reply and a full answer, each with its Chinese translation -- streamed over a
+// WebSocket, with question highlighting and a manual-refresh hotkey. The
+// transcription UI stays WLK's own.
 
 (function () {
   "use strict";
+
+  // Card order and labels. The kinds match Suggester._update_card.
+  const CARDS = [
+    { kind: "quick", label: "QUICK REPLY · 快速应答" },
+    { kind: "full", label: "FULL ANSWER · 完整回答" },
+  ];
 
   function buildPanel() {
     const panel = document.createElement("div");
     panel.id = "c3po-panel";
     panel.innerHTML = `
       <h2>💡 Reply suggestions</h2>
-      <textarea id="c3po-context" placeholder="Pre-meeting context: topic, project background, your role, key terms..."></textarea>
-      <div id="c3po-context-row">
-        <button class="c3po-btn" id="c3po-save">Save context</button>
-        <button class="c3po-btn secondary" id="c3po-refresh">Refresh (⌘J)</button>
+      <div id="c3po-context-summary" hidden>
+        <span id="c3po-context-summary-text"></span>
+        <button class="c3po-link" id="c3po-context-edit">Edit</button>
       </div>
-      <div id="c3po-status">connecting...</div>
+      <div id="c3po-context-editor">
+        <label for="c3po-me">About me <span class="c3po-note">kept across meetings</span></label>
+        <textarea id="c3po-me" placeholder="Name, role, team, what you own, how you like to come across..."></textarea>
+        <label for="c3po-meeting">Meeting background <span class="c3po-note">paste before each meeting</span></label>
+        <textarea id="c3po-meeting" class="tall" placeholder="Agenda, participants, project history, open questions..."></textarea>
+        <div id="c3po-context-row">
+          <button class="c3po-btn" id="c3po-save">Save</button>
+        </div>
+      </div>
+      <div id="c3po-status-row">
+        <span id="c3po-status">connecting...</span>
+        <button class="c3po-link" id="c3po-refresh">Refresh ⌘J</button>
+      </div>
       <div id="c3po-question-flag">🔔 You may be asked something</div>
       <div id="c3po-cards"></div>
     `;
     document.body.appendChild(panel);
+
+    // The two cards exist once and are updated in place: they stream several
+    // times a second, and rebuilding them would flicker and drop a click.
+    const container = panel.querySelector("#c3po-cards");
+    for (const { kind, label } of CARDS) {
+      const card = document.createElement("div");
+      card.className = "c3po-card";
+      card.dataset.kind = kind;
+      card.hidden = true;
+      card.innerHTML = `<div class="angle"></div><div class="text"></div><div class="zh"></div>`;
+      card.querySelector(".angle").textContent = label;
+      card.addEventListener("click", () => copyCard(card, card.querySelector(".text").textContent));
+      container.appendChild(card);
+    }
   }
 
   function setStatus(text) {
@@ -29,26 +62,14 @@
   }
 
   function renderCards(suggestions) {
-    const container = document.getElementById("c3po-cards");
-    if (!container) return;
-    container.innerHTML = "";
-    // Short replies first, the full-answer script last (visually distinct).
-    const ordered = [...suggestions].sort(
-      (a, b) => (a.kind === "long" ? 1 : 0) - (b.kind === "long" ? 1 : 0)
-    );
-    ordered.forEach((s) => {
-      const card = document.createElement("div");
-      card.className = "c3po-card";
-      // Title combines the English angle with the Chinese hint, e.g.
-      // "BUY TIME · 争取时间". Same layout for every card (short and long).
-      const en = s.kind === "long" ? "FULL ANSWER" : (s.angle || "REPLY");
-      const title = escapeHtml(en).toUpperCase() +
-        (s.hint_zh ? ` · ${escapeHtml(s.hint_zh)}` : "");
-      card.innerHTML =
-        `<div class="angle">${title}</div><div class="text">${escapeHtml(s.text)}</div>`;
-      card.addEventListener("click", () => copyCard(card, s.text));
-      container.appendChild(card);
-    });
+    for (const s of suggestions) {
+      const card = document.querySelector(`.c3po-card[data-kind="${s.kind}"]`);
+      if (!card) continue;
+      card.hidden = false;
+      card.classList.toggle("streaming", !s.done);
+      card.querySelector(".text").textContent = s.text || "";
+      card.querySelector(".zh").textContent = s.zh || "";
+    }
   }
 
   function copyCard(card, text) {
@@ -56,12 +77,6 @@
       card.classList.add("copied");
       setTimeout(() => card.classList.remove("copied"), 700);
     });
-  }
-
-  function escapeHtml(str) {
-    const div = document.createElement("div");
-    div.textContent = str == null ? "" : String(str);
-    return div.innerHTML;
   }
 
   function connectSuggestions() {
@@ -75,21 +90,49 @@
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type !== "suggestions") return;
-      renderCards(data.suggestions || []);
+      const cards = data.suggestions || [];
+      renderCards(cards);
       const flag = document.getElementById("c3po-question-flag");
       if (flag) flag.classList.toggle("active", !!data.is_question);
-      const stamp = new Date().toLocaleTimeString();
-      setStatus(`updated ${stamp}`);
+      if (cards.length && cards.every((c) => c.done)) {
+        setStatus(`updated ${new Date().toLocaleTimeString()}`);
+      }
     };
   }
 
+  // Once saved, the editor folds into one line: during the meeting it is dead
+  // space, and the cards need the room.
+  function showContextEditor(open) {
+    const me = document.getElementById("c3po-me").value.trim();
+    const meeting = document.getElementById("c3po-meeting").value.trim();
+    const parts = [me ? "About me ✓" : "About me —"];
+    parts.push(meeting ? `Meeting background (${meeting.length.toLocaleString()} chars)` : "No meeting background");
+    document.getElementById("c3po-context-summary-text").textContent = parts.join(" · ");
+    document.getElementById("c3po-context-editor").hidden = !open;
+    document.getElementById("c3po-context-summary").hidden = open;
+  }
+
+  async function loadContext() {
+    try {
+      const saved = await (await fetch("/context")).json();
+      document.getElementById("c3po-me").value = saved.me || "";
+      document.getElementById("c3po-meeting").value = saved.meeting || "";
+      showContextEditor(!(saved.me || saved.meeting));
+    } catch (e) {
+      report("could not load context: " + e);
+    }
+  }
+
   async function saveContext() {
-    const ctx = document.getElementById("c3po-context").value;
     await fetch("/context", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ context: ctx }),
+      body: JSON.stringify({
+        me: document.getElementById("c3po-me").value,
+        meeting: document.getElementById("c3po-meeting").value,
+      }),
     });
+    showContextEditor(false);
     setStatus("context saved");
   }
 
@@ -314,6 +357,9 @@
   function wireEvents() {
     document.getElementById("c3po-save").addEventListener("click", saveContext);
     document
+      .getElementById("c3po-context-edit")
+      .addEventListener("click", () => showContextEditor(true));
+    document
       .getElementById("c3po-refresh")
       .addEventListener("click", forceRefresh);
     document.addEventListener("keydown", (e) => {
@@ -424,6 +470,7 @@
 
   function init() {
     buildPanel();
+    loadContext();
     addOverlayButton();
     addPowerButton();
     connectNativeShell();

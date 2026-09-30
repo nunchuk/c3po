@@ -161,10 +161,23 @@ In the window (or the browser page):
 - Press Record (the toolbar in the app, the round button in a browser) and start
   the meeting. Transcription + Chinese translation appear on the left
   (WhisperLiveKit's UI).
-- Fill in **pre-meeting context** (topic, project background, your role, key terms)
-  in the right panel and click **Save context**.
-- Reply suggestions refresh automatically as the conversation moves. Click a card
-  to copy it. Press **⌘J** to force an immediate refresh.
+- In the right panel, fill in **About me** (name, role, team, what you own — kept
+  across meetings) and paste a **Meeting background** before each meeting (e.g.
+  one you had an AI draft: agenda, participants, history, open questions), then
+  **Save**. Both are saved to `~/Library/Application Support/c3po/context.json`;
+  once saved the editor folds into one line (**Edit** reopens it).
+- Two reply cards follow the conversation, each with its Chinese translation:
+  **Quick reply** (1–2 sentences, first words in about a second) and **Full
+  answer** (3–6 sentences to read out). Anything the model can't know — your
+  progress, dates, numbers — comes as a `[placeholder]` for you to fill in rather
+  than a guess. A finished question ("…?") refreshes them immediately; otherwise
+  at most every 8s. Click a card to copy its English. **⌘J** forces a refresh.
+
+Cost: each refresh is two Claude Haiku 4.5 calls of a few hundred to a few
+thousand input tokens. Prompt caching applies only once the fixed part
+(instructions + About me + Meeting background) reaches Haiku 4.5's 4096-token
+minimum; below that it is silently skipped. The server log's `suggestion ...
+cache read N` lines show whether it is being hit.
 
 ## Stopping c3po
 
@@ -215,9 +228,10 @@ variables (loaded from `.env`). Common ones:
 | `C3PO_NEW_LINES_TRIGGER` | `2` | Regenerate after N new finalized lines |
 | `C3PO_CONTEXT_WINDOW_LINES` | `24` | Recent lines sent to Bedrock per call (split into background + immediate tiers) |
 | `C3PO_IMMEDIATE_LINES` | `6` | Of the window, the trailing lines the reply must directly address; the rest are background |
-| `C3PO_NUM_SUGGESTIONS` | `3` | Number of short reply options |
-| `C3PO_SHORT_MAX_TOKENS` | `220` | Max tokens for the fast short-replies call |
-| `C3PO_LONG_MAX_TOKENS` | `320` | Max tokens for the full-answer call |
+| `C3PO_SHORT_MAX_TOKENS` | `250` | Max tokens for the quick reply + its translation |
+| `C3PO_LONG_MAX_TOKENS` | `800` | Max tokens for the full answer + its translation |
+| `C3PO_SUGGESTION_TEMPERATURE` | `0.3` | Sampling temperature for replies (higher = more varied, more likely to fill in facts) |
+| `C3PO_CONTEXT_FILE` | `~/Library/Application Support/c3po/context.json` | Where About me / Meeting background are saved |
 | `AWS_REGION` | `ap-northeast-1` | Bedrock region |
 | `C3PO_PORT` | `8989` | Server port |
 | `C3PO_HOST` | `127.0.0.1` | Bind address (numeric on purpose — `localhost` can make uvicorn bind IPv6 only) |

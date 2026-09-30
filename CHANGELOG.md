@@ -5,6 +5,42 @@
 
 ## [Unreleased]
 
+### Changed — reply suggestions: two streamed cards with Chinese, and a two-part context (2026-09-30)
+
+- **Two cards, streamed.** A quick reply (1-2 sentences) and a full answer (3-6
+  sentences), each followed by its Chinese translation, replace the three short
+  angles + one long answer. They are two concurrent streamed calls instead of
+  structured-output JSON, so text appears as it is generated. Measured on jp.
+  Haiku 4.5: first words ~0.74s warm (~1.1s cold); in the page, a finished
+  question reached new quick-reply text in 936-1000ms.
+- **A finished question skips the debounce.** Before, the question usually
+  arrived as a fragment ("Nunchuk, can you") that started the 8s wait, and the
+  completed question then waited it out: 4992ms from the question to a new reply.
+  The wait now wakes on new content and a question ending in "?" goes at once; a
+  marker alone still waits, so a question being spoken doesn't fire per word.
+- **About me + Meeting background.** The single context box became two: About me
+  (kept across meetings) and Meeting background (pasted per meeting). Both are
+  persisted to `context_file` -- before, context lived only in server memory, so
+  a restart lost it and a page reload showed an empty box. Saved, the editor
+  folds into one line. No generation before anyone has spoken: saving context
+  before the meeting used to produce replies to nothing.
+- **No invented facts.** Asked for a status update, Haiku filled in progress
+  nobody had mentioned ("We've finished the schema migration and data
+  validation") -- a false statement once read out. The prompt now limits it to
+  the transcript and context, with `[placeholders]` for anything else, and
+  temperature is 0.3: across 4 samples no invented progress remained.
+- **Prompt caching.** The fixed part (instructions, About me, Meeting background)
+  is the system prompt with an explicit breakpoint, the transcript follows it.
+  Measured on Bedrock through AnthropicBedrock: a 370-token prefix never cached;
+  a 4938-token one wrote 4938 tokens, then read 4938 on the next call. Haiku 4.5
+  needs a 4096-token prefix, so typical contexts do not cache yet; the
+  `suggestion ...` log line reports cache reads and writes.
+- The model echoed the old angle-bracket format template as its first line once;
+  the format is now given by example and `split_reply` drops echoed templates
+  and labels, and hides a half-streamed 中文 marker.
+- Removed `C3PO_NUM_SUGGESTIONS` (there is one quick reply now); added
+  `C3PO_SUGGESTION_TEMPERATURE` and `C3PO_CONTEXT_FILE`.
+
 ### Added — waveform and Save Transcript in the app toolbar (2026-09-30)
 
 - **Waveform.** Hiding the page's button row also hid WLK's waveform, which lives

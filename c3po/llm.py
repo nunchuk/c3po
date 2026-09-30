@@ -1,85 +1,84 @@
 """Amazon Bedrock client wrapper for generating English reply suggestions.
 
-Uses Claude Haiku 4.5 via the Anthropic SDK's AnthropicBedrock client with
-structured output (verified working on Bedrock). Authentication resolves from
-AWS_BEARER_TOKEN_BEDROCK in the environment; region from config.
+Uses Claude Haiku 4.5 via the Anthropic SDK's AnthropicBedrock client, streamed
+so the first words of a reply reach the panel within about a second.
+Authentication resolves from AWS_BEARER_TOKEN_BEDROCK in the environment;
+region from config.
 """
 
 from __future__ import annotations
 
-import json
 import logging
+import time
+from typing import Callable
 
 from anthropic import AnthropicBedrock
 
 from c3po.config import config
-from c3po.prompts import SUGGESTIONS_SCHEMA, SYSTEM_PROMPT, build_user_message
+from c3po.prompts import build_system_prompt, build_user_message
 
 logger = logging.getLogger(__name__)
 
 
 class SuggestionClient:
-    """Generates short English reply suggestions from meeting context."""
+    """Streams one English reply (with its Chinese translation) per call."""
 
     def __init__(self) -> None:
         # api_key resolves from AWS_BEARER_TOKEN_BEDROCK in the environment.
         self._client = AnthropicBedrock(aws_region=config.aws_region)
 
-    def suggest(
+    def stream_reply(
         self,
-        context: str,
+        kind: str,
+        me: str,
+        meeting: str,
         earlier_transcript: str,
         recent_transcript: str,
         last_question: str | None,
-        mode: str = "both",
-    ) -> list[dict]:
-        """Return a list of reply suggestions.
+        on_text: Callable[[str], None],
+    ) -> str:
+        """Stream a 'quick' or 'full' reply, calling `on_text` with the text so far.
 
-        Each item is a dict with keys: 'text', optional 'hint_zh', optional 'angle'.
-        Returns an empty list on failure (caller keeps the previous batch visible).
-
-        Args:
-            earlier_transcript: Earlier meeting lines, sent as background so the
-                model follows the conversation arc.
-            recent_transcript: The most recent lines — the moment the reply must
-                directly address.
-            mode: 'short' for the quick replies only, 'long' for the full-answer
-                script only, or 'both' for a single combined call. The Suggester
-                fires 'short' and 'long' concurrently so the time-critical short
-                cards render before the longer answer is finished.
+        Blocking -- run it in a worker thread. Returns the complete text, or ""
+        on failure (the caller keeps the previous card visible).
         """
-        user_message = build_user_message(
-            context=context,
-            earlier_transcript=earlier_transcript,
-            recent_transcript=recent_transcript,
-            last_question=last_question,
-            num_suggestions=config.num_suggestions,
-            mode=mode,
-        )
-        max_tokens = {
-            "short": config.short_max_tokens,
-            "long": config.long_max_tokens,
-        }.get(mode, config.max_tokens)
+        # Explicit breakpoint: the legacy Bedrock integration rejects top-level
+        # automatic caching. It is a no-op until the prefix reaches Haiku 4.5's
+        # 4096-token minimum (see prompts.py).
+        system = [{
+            "type": "text",
+            "text": build_system_prompt(me, meeting),
+            "cache_control": {"type": "ephemeral"},
+        }]
+        user = build_user_message(earlier_transcript, recent_transcript, last_question, kind)
+        max_tokens = config.short_max_tokens if kind == "quick" else config.long_max_tokens
+
+        started = time.perf_counter()
+        first = None
+        text = ""
         try:
-            message = self._client.messages.create(
+            with self._client.messages.stream(
                 model=config.bedrock_model_id,
                 max_tokens=max_tokens,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_message}],
-                output_config={
-                    "format": {"type": "json_schema", "schema": SUGGESTIONS_SCHEMA}
-                },
-            )
+                # Low temperature: at the default 1.0 the quick reply sometimes
+                # filled in progress nobody had mentioned.
+                temperature=config.suggestion_temperature,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            ) as stream:
+                for chunk in stream.text_stream:
+                    if first is None:
+                        first = time.perf_counter() - started
+                    text += chunk
+                    on_text(text)
+                usage = stream.get_final_message().usage
         except Exception:  # noqa: BLE001 - network/model errors must not crash the loop
-            logger.exception("Bedrock suggestion request failed (mode=%s)", mode)
-            return []
-
-        text = "".join(block.text for block in message.content if block.type == "text")
-        try:
-            data = json.loads(text)
-            suggestions = data.get("suggestions", [])
-            # Keep only well-formed entries.
-            return [s for s in suggestions if isinstance(s, dict) and s.get("text")]
-        except (json.JSONDecodeError, AttributeError):
-            logger.warning("Could not parse suggestion JSON (mode=%s): %r", mode, text[:200])
-            return []
+            logger.exception("Bedrock suggestion stream failed (kind=%s)", kind)
+            return ""
+        logger.info(
+            "suggestion %s: first %.0fms, total %.0fms, input %d, cache read %d, cache write %d",
+            kind, (first or 0) * 1000, (time.perf_counter() - started) * 1000,
+            usage.input_tokens, usage.cache_read_input_tokens or 0,
+            usage.cache_creation_input_tokens or 0,
+        )
+        return text

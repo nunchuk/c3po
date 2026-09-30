@@ -148,12 +148,20 @@ class Config:
         "~/Library/Application Support/meeting-translator/overlay-visible"
     )
 
-    # The suggestion call is split into a fast short-replies call and a slower
-    # full-answer call so the time-critical short cards render first (see
-    # Suggester._generate). Separate, tighter token budgets keep each call as
-    # small as possible; `max_tokens` remains the fallback for a combined call.
-    short_max_tokens: int = int(os.getenv("C3PO_SHORT_MAX_TOKENS", "220"))
-    long_max_tokens: int = int(os.getenv("C3PO_LONG_MAX_TOKENS", "320"))
+    # Reply suggestions are two concurrent streamed calls: a quick reply (1-2
+    # sentences) and a full answer (3-6 sentences), each followed by its Chinese
+    # translation -- which costs more tokens than the English, hence the budgets.
+    # Measured on jp. Haiku 4.5: first words after ~0.74s, the whole quick reply
+    # with its translation in ~1.5s.
+    short_max_tokens: int = int(os.getenv("C3PO_SHORT_MAX_TOKENS", "250"))
+    long_max_tokens: int = int(os.getenv("C3PO_LONG_MAX_TOKENS", "800"))
+    suggestion_temperature: float = float(os.getenv("C3PO_SUGGESTION_TEMPERATURE", "0.3"))
+
+    # "About me" and "Meeting background" from the panel, persisted so neither
+    # has to be retyped after a restart.
+    context_file: str = os.path.expanduser(
+        os.getenv("C3PO_CONTEXT_FILE", "~/Library/Application Support/c3po/context.json")
+    )
 
     # --- Rolling meeting buffer ---
     # How many recent transcript lines to keep as context for suggestions.
@@ -175,8 +183,6 @@ class Config:
     fallback_seconds: float = float(os.getenv("C3PO_FALLBACK_SECONDS", "20"))
     # Regenerate once this many new finalized lines have accumulated.
     new_lines_trigger: int = int(os.getenv("C3PO_NEW_LINES_TRIGGER", "2"))
-    # Number of reply options to request.
-    num_suggestions: int = int(os.getenv("C3PO_NUM_SUGGESTIONS", "3"))
 
     # Substrings that flag the meeting may be turning to the user (case-insensitive).
     # The user's name(s) can be added here at runtime via the context panel.
