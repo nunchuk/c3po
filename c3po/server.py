@@ -41,7 +41,7 @@ from whisperlivekit import (  # noqa: E402
 )
 from whisperlivekit.config import WhisperLiveKitConfig  # noqa: E402
 
-from c3po import mlx_thread_fix, segment_fix  # noqa: E402
+from c3po import loop_guard, mlx_thread_fix, segment_fix  # noqa: E402
 from c3po.suggester import Suggester  # noqa: E402
 from c3po.translator import Translator  # noqa: E402
 
@@ -54,6 +54,10 @@ if config.backend == "mlx-whisper":
 # a timestamp-coupled translation to break. No-op if diarization is on.
 if not config.diarization:
     segment_fix.apply()
+
+# Reset the decoder when Whisper locks into repeating one phrase ("No. No. No."),
+# which WLK only recovers from after >=5s of silence.
+loop_guard.apply()
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"

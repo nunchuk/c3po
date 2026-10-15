@@ -63,6 +63,11 @@ class Config:
     # Force a transcript line break after this many tokens even without
     # punctuation (length fallback for run-on speech). ~one long sentence.
     max_tokens_per_line: int = int(os.getenv("C3PO_MAX_TOKENS_PER_LINE", "30"))
+
+    # Reset the decoder when this many consecutive transcript words contain at
+    # most two distinct words ("No. No. No." after a Zoom network stall), which
+    # otherwise loops forever -- see loop_guard.py. 0 disables the guard.
+    loop_guard_words: int = int(os.getenv("C3PO_LOOP_GUARD_WORDS", "12"))
     # faster-whisper (CTranslate2): the only backend where NLLW translation
     # works. The MLX backend transcribes fast but its SimulStreaming token
     # format breaks NLLW (no Chinese output), and it also needs the

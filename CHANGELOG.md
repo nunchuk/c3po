@@ -5,6 +5,30 @@
 
 ## [Unreleased]
 
+### Fixed — transcript stuck on "No. No. No." after a Zoom network stall (2026-10-15)
+
+After Zoom's audio broke up during a network stall, the transcript showed only
+"No. No. No. No." (translated 不。不是。不是。) for the rest of the recording,
+while the meeting went on talking. The server log of that meeting has two such
+loops: "It's a. It's a." from ~356s until the recording was stopped by hand, and
+after Record, "No." from ~141s on -- every one of the next 1531 output words was
+"No.", over 8 minutes, with no silence longer than 1.4s.
+
+SimulStreaming feeds its own output back into the decoder: the words already
+decoded for the 20s audio window, plus older text as a prompt. Once a
+hallucinated phrase fills both, every later decode repeats it. WLK only resets
+the decoder after >=5s of silence, which a live meeting never provides.
+Reproduced offline: with " No." in the window, 35s of clear synthesized speech
+still came out as "No. No. No." only.
+
+`loop_guard.py` patches `SimulStreamingOnlineProcessor.process_iter`: when the
+last 12 output words (`C3PO_LOOP_GUARD_WORDS`) contain at most two distinct
+words, that batch is dropped and the decoder is reset the way WLK's long-silence
+path does it, with timestamps continuing from the current stream position. The
+same reproduction now leaks 8 "No." and then transcribes the speech; clean
+speech is unchanged, and replaying the meeting's 1569 words from before the loops
+triggers only on the "It's a." loop.
+
 ### Changed — reply suggestions: two streamed cards with Chinese, and a two-part context (2026-09-30)
 
 - **Two cards, streamed.** A quick reply (1-2 sentences) and a full answer (3-6
