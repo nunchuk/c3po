@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### Added — logo and screenshot in the README (2026-10-15)
+
+The README now opens with the app icon (`assets/c3po.svg`) and a screenshot of
+C-3PO.app (`assets/screenshot.png`). The meeting in the screenshot is synthetic:
+a scripted product-launch sync spoken by macOS `say` voices and played into
+BlackHole, with made-up About me / Meeting background, so no real meeting
+content is published.
+
 ### Changed — reply cards pause while the pointer is on them (2026-10-15)
 
 The cards changed before they could be read: a meeting's log had 92

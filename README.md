@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/c3po.svg" width="96" alt="c3po logo">
+</p>
+
 # c3po
 
 A local meeting assistant for MS Teams / Zoom on Apple Silicon. It does two things:
@@ -11,6 +15,8 @@ A local meeting assistant for MS Teams / Zoom on Apple Silicon. It does two thin
 
 The UI is WhisperLiveKit's own transcription page with a reply-suggestion panel
 injected on the right.
+
+![C-3PO.app: the live transcript with Chinese under each line, and two reply cards on the right](assets/screenshot.png)
 
 ## Requirements
 
