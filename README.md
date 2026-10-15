@@ -269,8 +269,6 @@ variables (loaded from `.env`). Common ones:
 ## Verification scripts
 
 - `scripts/verify_bedrock.py` — checks Bedrock connectivity and the model id.
-- `scripts/verify_translation.py` — checks the NLLB EN→ZH path that translation
-  used before it moved to Bedrock; the server no longer uses it.
 - `scripts/feed_asr.py` — feeds a WebM file straight to `/asr` (no browser), handy
   for debugging the transcription/translation pipeline. Run the server with
   `C3PO_PCM_INPUT=0` for it: the default PCM mode does not decode WebM.

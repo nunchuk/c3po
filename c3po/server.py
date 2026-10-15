@@ -1,7 +1,8 @@
 """c3po FastAPI server.
 
 Single process that:
-  - embeds WhisperLiveKit's STT + NLLW (EN->ZH) pipeline (see WLK basic_server.py)
+  - embeds WhisperLiveKit's speech-to-text pipeline (see WLK basic_server.py) and
+    translates each transcript line to Chinese on Bedrock (translator.py)
   - serves WLK's built-in UI with an injected reply-suggestion panel
   - runs a background task that continuously regenerates English reply suggestions
     on Amazon Bedrock (Claude Haiku 4.5) and pushes them to the panel via WebSocket

@@ -6,7 +6,7 @@ AI collaboration guidance for this repository. These instructions override defau
 
 c3po is a local meeting assistant for MS Teams / Zoom on Apple Silicon (M4 / 16GB). It does two things:
 
-1. **Live transcription + EN→ZH translation** — WhisperLiveKit (`faster-whisper`, `base.en`) transcribes locally; **translation is done by c3po on Amazon Bedrock (Claude Haiku 4.5), per finalized English sentence**, NOT by WLK's built-in NLLW. Audio is captured from the desktop client through a **BlackHole** virtual audio device.
+1. **Live transcription + EN→ZH translation** — WhisperLiveKit (`faster-whisper`, `base.en`) transcribes locally; **translation is done by c3po on Amazon Bedrock (Amazon Nova 2 Lite by default), per English transcript line**, NOT by WLK's built-in NLLW. Audio is captured from the desktop client through a **BlackHole** virtual audio device.
 2. **English reply suggestions** — on **Amazon Bedrock (Claude Haiku 4.5)**, regenerated continuously in the background so a few fresh reply options always sit in the GUI.
 
 Single FastAPI process. It embeds WhisperLiveKit's transcription pipeline and serves WLK's built-in UI with an injected reply panel. See `README.md` for setup and run instructions.
@@ -88,6 +88,5 @@ avoid pointless merge commits.
 ## c3po-specific constraints
 
 - **Do not fork WhisperLiveKit.** Reuse it: embed `TranscriptionEngine` / `AudioProcessor`, and serve its UI via `get_inline_ui_html()` with our panel injected. Upgrades must stay drop-in.
-- **Verify Bedrock model id / region / model access before hardcoding.** Reply suggestions use `global.anthropic.claude-haiku-4-5-20251001-v1:0`; auth via `AWS_BEARER_TOKEN_BEDROCK` (a Bedrock API key, not full AWS credentials).
-- **Translation stays fully local.** Only short text snippets (recent transcript + context) go to Bedrock — never audio.
-- `nllw` is a required separate dependency for translation (not pulled in by `whisperlivekit[mlx-whisper]`).
+- **Verify Bedrock model id / region / model access before hardcoding.** Reply suggestions use `jp.anthropic.claude-haiku-4-5-20251001-v1:0` and translation `jp.amazon.nova-2-lite-v1:0` (`jp.` profiles serve the Japan regions only); auth via `AWS_BEARER_TOKEN_BEDROCK` (a Bedrock API key, not full AWS credentials).
+- **Audio stays local.** Only text goes to Bedrock — each transcript line for translation, recent transcript + context for replies — never audio.

@@ -5,6 +5,21 @@
 
 ## [Unreleased]
 
+### Changed — removed the leftovers of the NLLW translation path (2026-10-15)
+
+Translation moved from WLK's NLLW to Bedrock, but the old path lingered:
+- `nllw` is gone from `requirements.txt`. It also brought in `transformers`,
+  which only WLK's unused voxtral backend imports. Checked by blocking both from
+  import: the server still imports and the transcription engine still builds.
+- `scripts/verify_translation.py` (an NLLB smoke test) and the unused
+  `target_language` setting are removed.
+- Text still describing the old path is corrected: `.env.example` (it said Haiku
+  needs the `global.` id; both defaults are `jp.` profiles, and it now sets
+  `C3PO_AWS_REGION` -- an existing `.env` with `AWS_REGION` still works, it is
+  the fallback), the `config.py` backend and buffer comments, the `segment_fix.py`
+  and `server.py` docstrings, `run.sh` (no NLLB download), and `CLAUDE.md` (which
+  said translation "stays fully local" and that `nllw` is required).
+
 ### Fixed — README still described the old, fully local translation (2026-10-15)
 
 The README said translation was "fully local (… NLLW/NLLB 600M)", but each

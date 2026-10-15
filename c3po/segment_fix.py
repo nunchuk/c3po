@@ -3,9 +3,8 @@
 WhisperLiveKit only starts a new transcript line when it sees an explicit
 Silence token (>5s of silence) UNLESS diarization is enabled — in the
 non-diarization path (`TokensAlignment.get_lines`) punctuation is ignored, so a
-continuous 25s utterance becomes one giant unreadable block. That also stops
-NLLW from finalizing the translation (it finalizes per segment boundary), so the
-Chinese ends up partial.
+continuous 25s utterance becomes one giant unreadable block, whose Chinese is
+re-translated on every update until the block finally ends.
 
 We run diarization OFF (its deps are heavy), so this monkey-patches
 `TokensAlignment.get_lines` to ALSO break a line after any token that ends a

@@ -27,5 +27,5 @@ URL="http://${DISPLAY_HOST}:${PORT}"
 ( sleep 6 && command -v open >/dev/null && open "$URL" ) &
 
 echo "Starting c3po on ${URL}"
-echo "First run downloads Whisper + NLLB models (a few minutes)."
+echo "First run downloads the Whisper model."
 exec python3 -m c3po.server

@@ -34,7 +34,7 @@ class Config:
         """Base URL to show the user and open in the browser."""
         return f"http://{self.display_host}:{self.port}"
 
-    # --- WhisperLiveKit (speech-to-text + EN->ZH translation, fully local) ---
+    # --- WhisperLiveKit (speech-to-text, local) ---
     # Whisper model size; "small" balances speed/accuracy on Apple M4. Drop to
     # "base" if CPU/memory is tight.
     # "base.en" (English-only) keeps streaming latency low on CPU (~2.5s avg on
@@ -42,8 +42,6 @@ class Config:
     # ~12s real-time. Bump to "small"/"small.en" only if accuracy matters more.
     whisper_model: str = os.getenv("C3PO_WHISPER_MODEL", "base.en")
     source_language: str = os.getenv("C3PO_SOURCE_LANG", "en")
-    # NLLB target language code for Simplified Chinese.
-    target_language: str = os.getenv("C3PO_TARGET_LANG", "zho_Hans")
     # Speaker diarization (who said what). OFF by default: it needs a heavy extra
     # dependency (NVIDIA NeMo for Sortformer, or diart+pyannote with an HF token)
     # and adds latency. Enable with C3PO_DIARIZATION=1 after installing a backend.
@@ -51,8 +49,7 @@ class Config:
 
     # How long (seconds) a transcript segment can grow before it's force-trimmed
     # into a new line. WLK's default is 15s, which makes one giant unreadable
-    # block and stops NLLW from finalizing the translation. Lower = more frequent
-    # line breaks AND more frequent translation finalization.
+    # block. Lower = more frequent line breaks.
     buffer_trimming_sec: float = float(os.getenv("C3PO_BUFFER_TRIMMING_SEC", "6"))
 
     # Don't break a line at punctuation until it has at least this many tokens —
@@ -68,13 +65,12 @@ class Config:
     # most two distinct words ("No. No. No." after a Zoom network stall), which
     # otherwise loops forever -- see loop_guard.py. 0 disables the guard.
     loop_guard_words: int = int(os.getenv("C3PO_LOOP_GUARD_WORDS", "12"))
-    # faster-whisper (CTranslate2): the only backend where NLLW translation
-    # works. The MLX backend transcribes fast but its SimulStreaming token
-    # format breaks NLLW (no Chinese output), and it also needs the
-    # mlx_thread_fix GPU-stream patch. Since EN->ZH translation is a core
-    # requirement, faster-whisper is the default; it's plenty fast on M4
-    # (~1.25s latency, comfortably real-time). Set C3PO_BACKEND=mlx-whisper
-    # only if you want max transcription speed and DON'T need translation.
+
+    # faster-whisper (CTranslate2): comfortably real-time on M4, and the backend
+    # everything is tested on. mlx-whisper used to lose the Chinese because
+    # NLLW could not read its SimulStreaming tokens; translation now runs on
+    # Bedrock from the transcript lines, so that should no longer apply, but it
+    # has not been re-tested. It also needs the mlx_thread_fix GPU-stream patch.
     backend: str = os.getenv("C3PO_BACKEND", "faster-whisper")
 
     # Audio capture path. On (default): WLK's AudioWorklet streams raw 16 kHz
