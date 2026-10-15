@@ -6,8 +6,10 @@
 
 A local meeting assistant for MS Teams / Zoom on Apple Silicon. It does two things:
 
-1. **Live English→Chinese translation** of what the other side says — fully local
-   (WhisperLiveKit + `mlx-whisper` + NLLW/NLLB 600M). No audio leaves your machine.
+1. **Live English→Chinese subtitles** of what the other side says. Speech is
+   transcribed locally (WhisperLiveKit, `faster-whisper`, `base.en`); each English
+   transcript line is translated on Amazon Bedrock (Amazon Nova 2 Lite by
+   default). Audio never leaves your machine — only the text is sent.
 2. **English reply suggestions** that refresh continuously in the background, so a
    few ready-to-use replies always sit in the panel — useful when you get suddenly
    called on. Generated on Amazon Bedrock (Claude Haiku 4.5); only short text
@@ -24,7 +26,8 @@ injected on the right.
 - Python 3.10+
 - [Homebrew](https://brew.sh)
 - Xcode Command Line Tools, to build C-3PO.app (`xcode-select --install`)
-- An Amazon Bedrock API key with Claude Haiku 4.5 access
+- An Amazon Bedrock API key with access to Claude Haiku 4.5 (reply suggestions)
+  and Amazon Nova 2 Lite (translation)
 
 ## Setup
 
@@ -76,9 +79,11 @@ cp .env.example .env
 # Edit .env: set AWS_BEARER_TOKEN_BEDROCK to your Bedrock API key.
 ```
 
-Region defaults to `ap-northeast-1` (Tokyo) but the model id is the `global.` one,
-which routes dynamically, so any region with Bedrock works. If a region cannot
-reach the model, set `AWS_REGION=us-east-1` in `.env`.
+Region defaults to `ap-northeast-1` (Tokyo). Both default model ids are `jp.`
+inference profiles (Claude Haiku 4.5 for replies, Amazon Nova 2 Lite for
+translation), which only serve requests from the Japan regions. Elsewhere, set
+`C3PO_AWS_REGION` and point `C3PO_BEDROCK_MODEL_ID` / `C3PO_TRANSLATE_MODEL_ID` at
+inference profiles available in that region.
 
 Verify the connection:
 
@@ -93,7 +98,7 @@ PYTHONPATH=. python3 scripts/verify_bedrock.py
 ```
 
 This starts the server and opens `http://localhost:8989`. The first run downloads
-the Whisper (`small`) and NLLB (600M) models — a few minutes.
+the Whisper model (`base.en` by default).
 
 ### C-3PO.app (native window)
 
@@ -230,7 +235,9 @@ variables (loaded from `.env`). Common ones:
 | `C3PO_MIN_TOKENS_PER_LINE` | `8` | Don't break at punctuation until a line has N tokens (avoids tiny fragments). Lower = more, shorter segments |
 | `C3PO_MAX_TOKENS_PER_LINE` | `30` | Force a line break after N tokens even without punctuation (run-on speech) |
 | `C3PO_BUFFER_TRIMMING_SEC` | `6` | Max seconds before a transcript segment is force-trimmed |
-| `C3PO_BACKEND` | `faster-whisper` | ASR backend; `mlx-whisper` is faster but loses translation |
+| `C3PO_BACKEND` | `faster-whisper` | ASR backend; see Notes before switching to `mlx-whisper` |
+| `C3PO_TRANSLATE_MODEL_ID` | `jp.amazon.nova-2-lite-v1:0` | Bedrock model for the Chinese subtitles |
+| `C3PO_BEDROCK_MODEL_ID` | `jp.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model for reply suggestions |
 | `C3PO_DEBOUNCE_SECONDS` | `8` | Min seconds between Bedrock calls |
 | `C3PO_FALLBACK_SECONDS` | `20` | Regenerate after this if there's new content |
 | `C3PO_NEW_LINES_TRIGGER` | `2` | Regenerate after N new finalized lines |
@@ -240,7 +247,7 @@ variables (loaded from `.env`). Common ones:
 | `C3PO_LONG_MAX_TOKENS` | `800` | Max tokens for the full answer + its translation |
 | `C3PO_SUGGESTION_TEMPERATURE` | `0.3` | Sampling temperature for replies (higher = more varied, more likely to fill in facts) |
 | `C3PO_CONTEXT_FILE` | `~/Library/Application Support/c3po/context.json` | Where About me / Meeting background are saved |
-| `AWS_REGION` | `ap-northeast-1` | Bedrock region |
+| `C3PO_AWS_REGION` | `ap-northeast-1` | Bedrock region (falls back to `AWS_REGION`) |
 | `C3PO_PORT` | `8989` | Server port |
 | `C3PO_HOST` | `127.0.0.1` | Bind address (numeric on purpose — `localhost` can make uvicorn bind IPv6 only) |
 | `C3PO_DISPLAY_HOST` | `localhost` | Hostname shown in the URL and opened in the browser |
@@ -248,21 +255,22 @@ variables (loaded from `.env`). Common ones:
 
 ## Notes
 
-- **Backend choice.** Default is `faster-whisper` (CTranslate2) because it is the
-  only backend where NLLW EN→ZH translation works, and it's comfortably real-time
-  on M4 (~1.25s latency). The `mlx-whisper` backend transcribes a bit faster but
-  (a) its SimulStreaming token format breaks NLLW so **no Chinese translation
-  appears**, and (b) it needs a GPU-stream monkey-patch (`c3po/mlx_thread_fix.py`,
+- **Backend choice.** Default is `faster-whisper` (CTranslate2): comfortably
+  real-time on M4, and the backend everything is tested on. `mlx-whisper` used to
+  lose the Chinese because NLLW could not read its SimulStreaming tokens;
+  translation now runs on Bedrock from the English transcript lines, so that should
+  no longer apply, but it has not been re-tested. It also downloads its own model
+  on first use, and needs a GPU-stream monkey-patch (`c3po/mlx_thread_fix.py`,
   applied automatically when selected) to avoid `There is no Stream(gpu, N) in
-  current thread`. Only set `C3PO_BACKEND=mlx-whisper` if you want max
-  transcription speed and don't need translation.
+  current thread`.
 - **SSL.** On corporate networks that intercept TLS, the server points urllib at
   `/etc/ssl/cert.pem` so model downloads succeed (override via `C3PO_SSL_CERT_FILE`).
 
 ## Verification scripts
 
 - `scripts/verify_bedrock.py` — checks Bedrock connectivity and the model id.
-- `scripts/verify_translation.py` — checks the local NLLB EN→ZH translation path.
+- `scripts/verify_translation.py` — checks the NLLB EN→ZH path that translation
+  used before it moved to Bedrock; the server no longer uses it.
 - `scripts/feed_asr.py` — feeds a WebM file straight to `/asr` (no browser), handy
   for debugging the transcription/translation pipeline. Run the server with
   `C3PO_PCM_INPUT=0` for it: the default PCM mode does not decode WebM.

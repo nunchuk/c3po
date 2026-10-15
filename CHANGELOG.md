@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### Fixed — README still described the old, fully local translation (2026-10-15)
+
+The README said translation was "fully local (… NLLW/NLLB 600M)", but each
+transcript line's text goes to Bedrock (Amazon Nova 2 Lite by default) -- a wrong
+data-flow claim in a public README. It also said the model id was `global.` and
+worked from any region, while both defaults are `jp.` inference profiles that only
+serve the Japan regions; that the first run downloads NLLB; and that
+`mlx-whisper` loses the Chinese. That loss came from NLLW, which no longer
+translates; `mlx-whisper` with Bedrock translation is noted as untested (a test
+run could not download its model). Added the two model-id variables and
+`C3PO_AWS_REGION` to the configuration table.
+
 ### Added — logo and screenshot in the README (2026-10-15)
 
 The README now opens with the app icon (`assets/c3po.svg`) and a screenshot of
