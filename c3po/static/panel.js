@@ -61,14 +61,63 @@
     if (el) el.textContent = text;
   }
 
-  function renderCards(suggestions) {
+  // Reading pause. Replies were replaced every ~11s, and a full answer takes
+  // 20-30s to read, so while the pointer is on the cards a new reply is held
+  // back and shown once it leaves.
+  let readingPaused = false;
+  // The pause began while a reply was streaming in: let that reply (both
+  // cards) finish. Pointing at a reply as it appears must not freeze it half
+  // written, or keep one card from the reply before.
+  let finishing = false;
+  let heldSnapshot = null;
+  // Set by an explicit refresh, cleared when the pointer leaves the cards: the
+  // user asked for a new reply, so show it even with the pointer resting here.
+  let pauseSuppressed = false;
+
+  function setReadingPaused(on) {
+    if (!on) pauseSuppressed = false;
+    on = on && !pauseSuppressed;
+    if (on === readingPaused) return;
+    readingPaused = on;
+    finishing = on && !!document.querySelector(".c3po-card.streaming:not([hidden])");
+    if (!on && heldSnapshot) {
+      const data = heldSnapshot;
+      heldSnapshot = null;
+      applySnapshot(data);
+    }
+  }
+
+  // Returns true if a card was left unchanged because of `hold`.
+  function renderCards(suggestions, hold) {
+    let held = false;
     for (const s of suggestions) {
       const card = document.querySelector(`.c3po-card[data-kind="${s.kind}"]`);
       if (!card) continue;
+      if (hold && !card.hidden) {
+        if (card.querySelector(".text").textContent !== (s.text || "")) held = true;
+        continue;
+      }
       card.hidden = false;
       card.classList.toggle("streaming", !s.done);
       card.querySelector(".text").textContent = s.text || "";
       card.querySelector(".zh").textContent = s.zh || "";
+    }
+    return held;
+  }
+
+  function applySnapshot(data) {
+    const cards = data.suggestions || [];
+    const allDone = cards.length > 0 && cards.every((c) => c.done);
+    const held = renderCards(cards, readingPaused && !finishing);
+    if (allDone) finishing = false;
+    // The question flag is an alert, not reading content: it stays live.
+    const flag = document.getElementById("c3po-question-flag");
+    if (flag) flag.classList.toggle("active", !!data.is_question);
+    if (held) {
+      heldSnapshot = data;  // the newest wins
+      setStatus("⏸ new reply ready - move the pointer off to show it");
+    } else if (allDone) {
+      setStatus(`updated ${new Date().toLocaleTimeString()}`);
     }
   }
 
@@ -90,13 +139,7 @@
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type !== "suggestions") return;
-      const cards = data.suggestions || [];
-      renderCards(cards);
-      const flag = document.getElementById("c3po-question-flag");
-      if (flag) flag.classList.toggle("active", !!data.is_question);
-      if (cards.length && cards.every((c) => c.done)) {
-        setStatus(`updated ${new Date().toLocaleTimeString()}`);
-      }
+      applySnapshot(data);
     };
   }
 
@@ -137,6 +180,9 @@
   }
 
   async function forceRefresh() {
+    const wasPaused = readingPaused;
+    setReadingPaused(false);  // shows a held reply now
+    if (wasPaused) pauseSuppressed = true;
     await fetch("/refresh", { method: "POST" });
     setStatus("refreshing...");
   }
@@ -350,6 +396,11 @@
       toggleSettings: () => gear.click(),
       toggleOverlay: () => overlay.click(),
       togglePanel: () => document.body.classList.toggle("c3po-panel-hidden"),
+      // Pointer position in CSS pixels, or null once it left the window.
+      pointer: (x, y) => {
+        const el = x === null ? null : document.elementFromPoint(x, y);
+        setReadingPaused(!!el && document.getElementById("c3po-cards").contains(el));
+      },
     };
     post();
   }
@@ -362,6 +413,15 @@
     document
       .getElementById("c3po-refresh")
       .addEventListener("click", forceRefresh);
+    // In C-3PO.app the pointer comes from the native shell instead
+    // (c3poNative.pointer): WebKit sends no hover events there while another
+    // app -- the meeting -- is frontmost.
+    const handlers = window.webkit && window.webkit.messageHandlers;
+    if (!handlers || !handlers.c3po) {
+      const cards = document.getElementById("c3po-cards");
+      cards.addEventListener("mouseenter", () => setReadingPaused(true));
+      cards.addEventListener("mouseleave", () => setReadingPaused(false));
+    }
     document.addEventListener("keydown", (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") {
         e.preventDefault();

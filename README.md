@@ -172,6 +172,8 @@ In the window (or the browser page):
   progress, dates, numbers — comes as a `[placeholder]` for you to fill in rather
   than a guess. A finished question ("…?") refreshes them immediately; otherwise
   at most every 8s. Click a card to copy its English. **⌘J** forces a refresh.
+  While the pointer is on the cards they stay put, even with Zoom in front;
+  a newer reply waits until the pointer leaves.
 
 Cost: each refresh is two Claude Haiku 4.5 calls of a few hundred to a few
 thousand input tokens. Prompt caching applies only once the fixed part

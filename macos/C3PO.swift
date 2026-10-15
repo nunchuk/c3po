@@ -304,6 +304,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         webView.uiDelegate = self
         webView.navigationDelegate = self
         webView.isInspectable = true  // Safari > Develop, since there is no console here
+        // WebKit tracks the pointer only while its window is key, and during a
+        // meeting the call app is: the page saw no hover at all with another app
+        // frontmost. This area is always active and forwards the pointer to
+        // panel.js, which pauses the reply cards while they are being read.
+        webView.addTrackingArea(NSTrackingArea(
+            rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self, userInfo: nil))
 
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
@@ -581,6 +588,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
         let ours = ["localhost", "127.0.0.1"].contains(origin.host) && origin.port == port
         decisionHandler(ours && type == .microphone ? .grant : .deny)
+    }
+
+    // Tracking-area callbacks (see buildWindow). The explicit selectors matter:
+    // this is not an NSResponder, so Swift would otherwise export
+    // `mouseMovedWith:`, which AppKit never sends.
+    @objc(mouseEntered:) func mouseEntered(with event: NSEvent) { forwardPointer(event) }
+    @objc(mouseMoved:) func mouseMoved(with event: NSEvent) { forwardPointer(event) }
+    @objc(mouseExited:) func mouseExited(with event: NSEvent) { callPage("pointer(null)") }
+
+    /// Sends the pointer to the page in CSS pixels from the top-left of the view.
+    private func forwardPointer(_ event: NSEvent) {
+        let point = webView.convert(event.locationInWindow, from: nil)
+        let y = webView.isFlipped ? point.y : webView.bounds.height - point.y
+        callPage("pointer(\(Int(point.x)), \(Int(y)))")
     }
 
     // App Nap would throttle this process while the window sits behind Zoom.

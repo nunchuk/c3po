@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+### Changed — reply cards pause while the pointer is on them (2026-10-15)
+
+The cards changed before they could be read: a meeting's log had 92
+regenerations in ~1008s of audio, a new reply every ~11s, while a full answer
+(3-6 sentences plus Chinese) takes 20-30s to read -- worst when called on.
+While the pointer is on the cards, a new reply is now held back, the status
+reads "new reply ready", and it appears as soon as the pointer leaves. A reply
+already streaming in when the pointer arrives finishes (both cards), and ⌘J
+still shows its new reply. Server cadence is unchanged.
+
+In C-3PO.app the page cannot see the pointer itself: WebKit tracks it only
+while its window is key, and in a meeting Zoom is. With Finder frontmost the page
+got no mouseenter/mouseleave at all; with C-3PO frontmost it did. The window now
+adds an always-active tracking area and forwards the pointer to
+`c3poNative.pointer(x, y)`, which hit-tests the cards. Needs an app rebuild
+(`bash scripts/make-overlay-app.sh`).
+
 ### Fixed — transcript stuck on "No. No. No." after a Zoom network stall (2026-10-15)
 
 After Zoom's audio broke up during a network stall, the transcript showed only
